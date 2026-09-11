@@ -39,11 +39,22 @@ swarmscope reputation -q "translate this"  # advice for a query, no request reco
 swarmscope reputation --rebuild            # recompute from the event log (after `swarmscope review`)
 ```
 
+## Dashboard
+
+`swarmscope serve` includes a bandit page at `/reputation` (linked from the run view):
+
+- **Learnt success probabilities**: every route with its posterior mean, 95% credible interval, and evidence counts, drawn as an interval bar so a well-measured 0.7 is visibly different from a lucky 0.9.
+- **Posterior densities**: the Beta(1 + successes, 1 + failures) curve per route. Tall and narrow means well-measured; a wide hump has been tried a few times.
+- **Evidence over time**: cumulative weighted successes minus failures per route, from the outcome log.
+- **Ask the bandit**: type a request, choose a kind and policy, and see the ranked advice the SDK would return, with local and global evidence per route. Nothing is recorded.
+
+The APIs behind it (`/api/reputation`, `/api/reputation/outcomes`, `/api/reputation/advise?q=&kind=&policy=&unit=`) return the same JSON the CLI prints.
+
 ## The bandit
 
 Each route is an arm with a Beta posterior over P(accepted).
 
-0. **Arms.** A bandit must know its arms. Every identity seen by `@sdk.agent` (at decoration time) or `agent_scope` is registered as a candidate, so an agent that has never run is explored instead of being invisible. Pass `candidates=[...]` (identities, or sequences as `"a|m| > b|m|"`) to restrict or extend the set for one request.
+0. **Arms.** A bandit must know its arms. Every identity declared with `@sdk.agent` is registered at decoration time, so an agent that has never run is explored instead of being invisible. `agent_scope` blocks are *not* registered: they are often structural (a dispatcher, a coordinator) and would be meaningless arms. Register other identities with `sdk.reputation.register_identity("name|model|")`, or pass `candidates=[...]` (identities, or sequences as `"a|m| > b|m|"`) to restrict or extend the set for one request.
 1. **Recall.** The request is embedded and the top-k similar past requests of the same `kind` (cosine ≥ `min_similarity`) are fetched from the store, across all runs by default (`scope="global"`). `kind` is your categorisation; requests of different kinds never inform each other.
 2. **Local evidence.** For each route that handled a similar request, successes and failures are summed with weight `similarity × source_weight × decay(age)`.
 3. **Global prior.** The route's all-time record contributes `prior_strength` pseudo-observations at its global success rate, so a route with no local history still competes, and the top `global_candidates` routes are always in the candidate set.

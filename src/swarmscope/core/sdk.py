@@ -232,7 +232,8 @@ class Swarmscope:
         run_id = c.run_id or self._run_id()
         chash = config_hash(config) if config else None
         ident = identity or agent_identity(role, name, model, chash)
-        self.reputation.known_identities.add(ident)
+        # Not registered as a bandit arm: scopes are often structural (dispatcher, coordinator).
+        # Arms come from @sdk.agent, sdk.reputation.register_identity(), or request(candidates=...).
         self.emit(AgentStart(run_id=run_id, group_id=gid, agent_id=aid, parent_id=parent, role=role, model=model,
                              config_hash=chash, name=name, attrs={"identity": ident}))
         t0 = time.perf_counter()

@@ -132,7 +132,7 @@ with sdk.request("translate this clause to French", kind="translation") as adv:
     sdk.verdict(art, status=..., source="verifier")     # updates the route's reputation
 ```
 
-Every route (the sequence of stable agent identities that produced an artifact) is a bandit arm with a Beta posterior learned from verdicts on similar past requests, plus its global record as a prior. Thompson sampling by default, so untried agents get explored; UCB and greedy available. Advisory, with credible intervals on every score. `swarmscope reputation` shows the leaderboard. See [docs/reputation.md](docs/reputation.md) and `examples/reputation_routing.py`.
+Every route (the sequence of stable agent identities that produced an artifact) is a bandit arm with a Beta posterior learned from verdicts on similar past requests, plus its global record as a prior. Thompson sampling by default, so untried agents get explored; UCB and greedy available. Advisory, with credible intervals on every score. `swarmscope reputation` shows the leaderboard and `swarmscope serve` has a bandit page (`/reputation`) with the learnt posteriors, their densities, evidence over time, and an "ask the bandit" box. See [docs/reputation.md](docs/reputation.md) and `examples/reputation_routing.py`.
 
 ## Adapters
 

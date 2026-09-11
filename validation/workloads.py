@@ -143,10 +143,24 @@ SEMI_OBJECTIVE = Workload(
 # --------------------------------------------------------------------------- 3. fuzzy
 _SYNTH_TASKS = [
     Task("brief-swarm", "Write a 150-word brief on when adding agents to a swarm stops paying off.", None,
-         {"rubric": ["mentions diminishing returns", "gives a concrete threshold or method", "under 200 words"]}),
+         {"rubric": ["mentions diminishing returns", "gives a concrete threshold or method", "under 200 words"],
+          "keywords": [["diminishing", "saturat", "plateau", "marginal"], ["threshold", "knee", "curve", "measure", "ablat"], []]}),
     Task("brief-dedup", "Write a 150-word brief on why hard-blocking duplicate work can hurt swarm search.", None,
-         {"rubric": ["mentions diversity", "mentions divergence after early steps", "under 200 words"]}),
+         {"rubric": ["mentions diversity", "mentions divergence after early steps", "under 200 words"],
+          "keywords": [["divers", "explor", "variety", "coverage"], ["diverg", "later", "differ", "branch"], []]}),
 ]
+
+
+def rubric_hits(task: Task, text: str) -> int:
+    """Keyword proxy for the human rubric; explicitly labelled as a proxy in results."""
+    low = text.lower()
+    hits = 0
+    for item, kws in zip(task.meta["rubric"], task.meta["keywords"]):
+        if item.startswith("under"):
+            hits += len(text.split()) < int(item.split()[1])
+        else:
+            hits += any(k in low for k in kws)
+    return hits
 
 
 def _synth_consolidate(contribs):
@@ -213,11 +227,13 @@ class OpenAISolver:
 
     name = "openai"
 
-    def __init__(self, model: str = "gpt-4o-mini") -> None:
+    def __init__(self, model: str | None = None) -> None:
+        import os
+
         from openai import OpenAI
         from swarmscope.adapters.openai_transport import instrument_openai
 
-        self.model = model
+        self.model = model or os.environ.get("SWARMSCOPE_VALIDATION_MODEL", "gpt-4o-mini")
         self._client = OpenAI()
         self._instrumented = False
         self._instrument = instrument_openai
@@ -241,8 +257,7 @@ class OpenAISolver:
             return {"code": code, "approach": "llm"}
         if workload.name == "semi-objective":
             return text
-        hits = sum(1 for r_ in task.meta["rubric"] if any(w in text.lower() for w in r_.split()[1:2]))
-        return {"draft": text, "rubric_hits": hits}
+        return {"draft": text, "rubric_hits": rubric_hits(task, text)}
 
 
 SOLVERS: dict[str, Callable[[], Solver]] = {"simulated": SimulatedSolver, "openai": OpenAISolver}

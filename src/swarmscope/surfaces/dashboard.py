@@ -22,24 +22,25 @@ HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>swarmscope</t
 body{font:14px system-ui,sans-serif;margin:0;background:#0f1117;color:#e6e6e6}
 header{padding:10px 16px;background:#161a24;display:flex;gap:16px;align-items:center}
 header select{background:#222;color:#eee;border:1px solid #444;padding:4px}
-main{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.card{background:#161a24;border:1px solid #262b38;border-radius:8px;padding:12px;min-height:120px}
+main{padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px}
+.card{background:#161a24;border:1px solid #262b38;border-radius:8px;padding:12px;min-height:120px;min-width:0;overflow-x:auto}
+svg{max-width:100%;height:auto}
 .card h3{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#9aa4b2}
 .kpi{display:flex;gap:18px;flex-wrap:wrap}.kpi div{min-width:110px}.kpi b{display:block;font-size:22px}
 .warn{color:#ffb454}.bad{color:#ff6b6b}.ok{color:#7ee787}
 ul.tree{list-style:none;padding-left:14px;margin:0}ul.tree li{margin:2px 0;cursor:pointer}
 ul.tree .cost{color:#9aa4b2;font-size:12px}
 svg text{fill:#ccc;font-size:11px}
-.full{grid-column:1/3}
+.full{grid-column:1/-1}
 small{color:#9aa4b2}
 </style></head><body>
-<header><b>swarmscope</b> <select id="run"></select> <span id="meta"></span></header>
+<header><b>swarmscope</b> <select id="run"></select> <span id="meta"></span> <a href="/reputation" style="margin-left:auto;color:#7ee787">bandit →</a></header>
 <main>
 <div class="card full"><h3>Run</h3><div class="kpi" id="kpi"></div><div id="warnings"></div></div>
-<div class="card"><h3>Cost sunburst (subtree cost, by lineage)</h3><svg id="sun" width="460" height="460"></svg></div>
+<div class="card"><h3>Cost sunburst (subtree cost, by lineage)</h3><svg id="sun" width="460" height="460" viewBox="0 0 460 460"></svg></div>
 <div class="card"><h3>Lineage tree</h3><div id="tree" style="max-height:440px;overflow:auto"></div></div>
-<div class="card"><h3>Dedup hit rate over time</h3><svg id="heat" width="460" height="140"></svg><small id="heatnote"></small></div>
-<div class="card"><h3>Value vs k (P(success), 95% CI)</h3><svg id="curve" width="460" height="260"></svg><small id="curvenote"></small></div>
+<div class="card"><h3>Dedup hit rate over time</h3><svg id="heat" width="460" height="140" viewBox="0 0 460 140"></svg><small id="heatnote"></small></div>
+<div class="card"><h3>Value vs k (P(success), 95% CI)</h3><svg id="curve" width="460" height="260" viewBox="0 0 460 260"></svg><small id="curvenote"></small></div>
 <div class="card full"><h3>Per-source verdicts &amp; waste</h3><div id="sources"></div></div>
 <div class="card full"><h3>Route reputation (store-wide; P(success) with 95% CI)</h3><div id="rep"></div></div>
 </main>
@@ -92,6 +93,62 @@ loadRuns();
 </script></body></html>"""
 
 
+REPUTATION_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>swarmscope · bandit</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:0;background:#0f1117;color:#e6e6e6}
+header{padding:10px 16px;background:#161a24;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+header a{color:#7ee787}header select,header input{background:#222;color:#eee;border:1px solid #444;padding:4px}
+main{padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px}
+.card{background:#161a24;border:1px solid #262b38;border-radius:8px;padding:12px;min-width:0;overflow-x:auto}
+svg{max-width:100%;height:auto}
+.card h3{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#9aa4b2}
+.full{grid-column:1/-1}table{border-collapse:collapse;width:100%}th,td{padding:4px 8px;border-bottom:1px solid #262b38;font-size:13px}
+th{text-align:left;color:#9aa4b2}td.num{text-align:right;font-variant-numeric:tabular-nums}
+svg text{fill:#ccc;font-size:11px}small{color:#9aa4b2}.bar{height:8px;background:#2a2f3d;border-radius:4px;position:relative}
+.bar i{position:absolute;top:0;bottom:0;background:rgba(126,231,135,.35)}.bar b{position:absolute;top:-2px;width:2px;height:12px;background:#7ee787}
+input[type=text]{width:60%}button{background:#2a2f3d;color:#eee;border:1px solid #444;padding:4px 10px;cursor:pointer}
+</style></head><body>
+<header><b>swarmscope · bandit</b> <a href="/">← runs</a>
+ <label>unit <select id="unit"><option value="sequence">sequence</option><option value="agent">agent</option></select></label>
+ <span id="summary"></span></header>
+<main>
+<div class="card full"><h3>Learnt success probabilities (Beta posterior per route; bar = 95% credible interval, tick = mean)</h3><div id="table"></div></div>
+<div class="card"><h3>Posterior densities (top 8 routes)</h3><svg id="dens" width="460" height="260" viewBox="0 0 460 260"></svg><small id="densnote"></small></div>
+<div class="card"><h3>Evidence over time (cumulative successes − failures per route)</h3><svg id="time" width="460" height="260" viewBox="0 0 460 260"></svg><small id="timenote"></small></div>
+<div class="card full"><h3>Ask the bandit</h3>
+ <input type="text" id="q" placeholder="a request, e.g. translate this clause to French"> kind <input type="text" id="kind" size="8" value="request">
+ policy <select id="policy"><option>thompson</option><option>ucb</option><option>greedy</option></select> <button id="ask">advise</button>
+ <div id="advice" style="margin-top:8px"></div></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);const f2=x=>x==null?'—':x.toFixed(2);
+async function j(u){const r=await fetch(u);return r.json()}
+function lgamma(x){const c=[76.18009172947146,-86.50532032941677,24.01409824083091,-1.231739572450155,0.1208650973866179e-2,-0.5395239384953e-5];let y=x,t=x+5.5;t-=(x+0.5)*Math.log(t);let s=1.000000000190015;for(let i=0;i<6;i++)s+=c[i]/++y;return -t+Math.log(2.5066282746310005*s/x)}
+function betapdf(x,a,b){if(x<=0||x>=1)return 0;return Math.exp((a-1)*Math.log(x)+(b-1)*Math.log(1-x)+lgamma(a+b)-lgamma(a)-lgamma(b))}
+const col=i=>`hsl(${(i*57)%360},65%,60%)`;
+async function load(){const unit=$('#unit').value;const [rep,tl]=await Promise.all([j('/api/reputation?unit='+unit),j('/api/reputation/outcomes')]);
+ const rows=rep.leaderboard;$('#summary').innerHTML=`<small>${rows.length} routes · ${tl.total} outcomes · ${tl.requests} requests</small>`;
+ if(!rows.length){$('#table').innerHTML='<small>no reputation yet — wrap work in <code>with sdk.request(...)</code>, emit verdicts, or run <code>swarmscope reputation --rebuild</code></small>';$('#dens').innerHTML='';$('#time').innerHTML='';return}
+ $('#table').innerHTML=`<table><tr><th>route</th><th>P(success)</th><th>95% CI</th><th style="width:30%">posterior</th><th>successes</th><th>failures</th></tr>${rows.map((r,i)=>`<tr><td><span style="color:${col(i)}">●</span> ${r.route.join(' → ')}</td><td class=num>${f2(r.mean)}</td><td class=num>[${f2(r.ci_low)}, ${f2(r.ci_high)}]</td><td><div class=bar><i style="left:${r.ci_low*100}%;width:${(r.ci_high-r.ci_low)*100}%"></i><b style="left:${r.mean*100}%"></b></div></td><td class=num>${r.global_successes.toFixed(1)}</td><td class=num>${r.global_failures.toFixed(1)}</td></tr>`).join('')}</table>`;
+ dens(rows.slice(0,8));timeline(tl,unit)}
+function dens(rows){const svg=$('#dens');svg.innerHTML='';const W=460,H=260,ml=30,mb=24;const ns='http://www.w3.org/2000/svg';let ymax=0;const curves=rows.map(r=>{const a=1+r.global_successes,b=1+r.global_failures;const pts=[];for(let i=1;i<200;i++){const x=i/200;const y=betapdf(x,a,b);ymax=Math.max(ymax,y);pts.push([x,y])}return pts});
+ curves.forEach((pts,i)=>{const p=document.createElementNS(ns,'path');p.setAttribute('d','M'+pts.map(([x,y])=>(ml+x*(W-ml-10))+','+(H-mb-y/ymax*(H-mb-15))).join('L'));p.setAttribute('stroke',col(i));p.setAttribute('fill','none');p.setAttribute('stroke-width','1.8');const t=document.createElementNS(ns,'title');t.textContent=rows[i].route.join(' → ');p.appendChild(t);svg.appendChild(p)});
+ for(const v of [0,0.25,0.5,0.75,1]){const t=document.createElementNS(ns,'text');t.setAttribute('x',ml+v*(W-ml-10)-6);t.setAttribute('y',H-8);t.textContent=v;svg.appendChild(t)}
+ $('#densnote').textContent='Beta(1+successes, 1+failures) — a tall narrow peak is a well-measured route; a wide hump has been tried a few times'}
+function timeline(tl,unit){const svg=$('#time');svg.innerHTML='';const ns='http://www.w3.org/2000/svg';const W=460,H=260,ml=30,mb=24;
+ const byRoute={};for(const o of tl.outcomes){const key=unit==='agent'?o.route[o.route.length-1]:o.route.join(' → ');(byRoute[key]=byRoute[key]||[]).push(o)}
+ const keys=Object.keys(byRoute).slice(0,8);if(!keys.length)return;const t0=Math.min(...tl.outcomes.map(o=>o.ts)),t1=Math.max(...tl.outcomes.map(o=>o.ts))||t0+1;let lo=0,hi=0;const series=keys.map(k=>{let c=0;const pts=byRoute[k].sort((a,b)=>a.ts-b.ts).map(o=>{c+=o.accepted?o.weight:-o.weight;lo=Math.min(lo,c);hi=Math.max(hi,c);return [o.ts,c]});return pts});
+ const sx=t=>ml+((t-t0)/((t1-t0)||1))*(W-ml-10),sy=v=>H-mb-((v-lo)/((hi-lo)||1))*(H-mb-15);
+ series.forEach((pts,i)=>{const p=document.createElementNS(ns,'path');p.setAttribute('d','M'+sx(t0)+','+sy(0)+'L'+pts.map(([t,v])=>sx(t)+','+sy(v)).join('L'));p.setAttribute('stroke',col(i));p.setAttribute('fill','none');p.setAttribute('stroke-width','1.8');const tt=document.createElementNS(ns,'title');tt.textContent=keys[i];p.appendChild(tt);svg.appendChild(p)});
+ const z=document.createElementNS(ns,'line');z.setAttribute('x1',ml);z.setAttribute('x2',W-10);z.setAttribute('y1',sy(0));z.setAttribute('y2',sy(0));z.setAttribute('stroke','#444');svg.appendChild(z);
+ $('#timenote').textContent=`${tl.outcomes.length} most recent outcomes; weight = verdict-source weight × confidence`}
+$('#ask').onclick=async()=>{const q=$('#q').value.trim();if(!q)return;const a=await j('/api/reputation/advise?q='+encodeURIComponent(q)+'&kind='+encodeURIComponent($('#kind').value)+'&policy='+$('#policy').value+'&unit='+$('#unit').value);
+ if(a.cold_start){$('#advice').innerHTML=`<small>cold start${a.timed_out?' (timed out)':''}: no evidence and no registered candidates — the caller would use its default route</small>`;return}
+ $('#advice').innerHTML=`<small>${a.similar.length} similar past requests · policy ${a.policy}</small><table><tr><th>route</th><th>score</th><th>P(success)</th><th>95% CI</th><th>local evidence</th><th>global evidence</th><th>similar</th></tr>${a.routes.map(r=>`<tr><td>${r.route.join(' → ')}</td><td class=num>${f2(r.score)}</td><td class=num>${f2(r.mean)}</td><td class=num>[${f2(r.ci_low)}, ${f2(r.ci_high)}]</td><td class=num>${r.local_successes.toFixed(1)} / ${r.n.toFixed(1)}</td><td class=num>${r.global_successes.toFixed(1)} / ${(r.global_successes+r.global_failures).toFixed(1)}</td><td class=num>${r.similar_requests}</td></tr>`).join('')}</table>`};
+$('#unit').onchange=load;load();
+</script></body></html>"""
+
+
 def make_handler(store: Store):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet
@@ -119,12 +176,36 @@ def make_handler(store: Store):
                     return
                 if parts[:2] == ["api", "runs"]:
                     return self._json([r.to_dict() for r in store.runs()])
+                if parts == ["reputation"]:
+                    body = REPUTATION_HTML.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if parts[:2] == ["api", "reputation"]:
-                    from ..reputation import Router
+                    from ..reputation import Router, RouterPolicy
 
                     q = parse_qs(u.query)
-                    lb = Router(store).leaderboard(limit=25, unit=q.get("unit", ["sequence"])[0])
-                    return self._json({"leaderboard": [r.to_dict() for r in lb]})
+                    unit = q.get("unit", ["sequence"])[0]
+                    if len(parts) == 2:
+                        lb = Router(store).leaderboard(limit=50, unit=unit)
+                        return self._json({"leaderboard": [r.to_dict() for r in lb]})
+                    if parts[2] == "outcomes":
+                        outs = store.route_outcomes(limit=2000)
+                        return self._json({"total": len(outs), "requests": len({o.request_id for o in outs}),
+                                           "outcomes": [{"ts": o.ts, "route": o.route, "accepted": o.accepted,
+                                                         "weight": o.weight, "source": o.source, "request_id": o.request_id}
+                                                        for o in outs]})
+                    if parts[2] == "advise":
+                        text = q.get("q", [""])[0]
+                        pol = RouterPolicy(policy=q.get("policy", ["greedy"])[0], unit=unit)
+                        r = Router(store, policy=pol)
+                        for st in store.route_stats():  # every known route is a candidate
+                            r.register_identity(st.route[-1] if unit == "agent" else " > ".join(st.route))
+                        adv = r.advise(text, request_id="_dash", kind=q.get("kind", ["request"])[0])
+                        return self._json(adv.to_dict())
                 if parts[:2] == ["api", "run"] and len(parts) == 4:
                     run_id, what = parts[2], parts[3]
                     g = LineageGraph(store.events(run_id))
