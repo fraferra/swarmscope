@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * *"   # nightly: adapters against each framework's main
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env: { POSTGRES_USER: swarm, POSTGRES_PASSWORD: swarm, POSTGRES_DB: swarmscope }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U swarm" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SWARMSCOPE_PG_URL: postgresql://swarm:swarm@localhost:5432/swarmscope
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python ${{ matrix.python }}
+      - run: uv pip install -e ".[dev]"
+      - run: .venv/bin/python -m pytest -q
+      - name: validation protocol (smoke)
+        run: .venv/bin/python -m validation.run --ks 1,5,25 --reps 2 --store memory:// --out /tmp/results.md
+
+  adapters-pinned:
+    name: adapter contract tests (pinned)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12
+      # Pins are the contract: the versions the adapters were last verified against.
+      # Bump deliberately; the nightly job is the early warning.
+      - run: uv pip install -e ".[dev]" "openai==2.54.0" "httpx==0.28.1" "langchain-core==1.6.2" "langgraph==1.2.11" "crewai==1.15.21"
+      - run: .venv/bin/python -m pytest -q tests/adapters
+
+  adapters-nightly:
+    name: adapter contract tests (framework main)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: openai
+            spec: "git+https://github.com/openai/openai-python.git@main"
+            tests: tests/adapters/test_openai_contract.py
+          - name: langchain-core
+            spec: "git+https://github.com/langchain-ai/langchain.git@master#subdirectory=libs/core"
+            tests: tests/adapters/test_langchain_contract.py
+          - name: crewai
+            spec: "git+https://github.com/crewAIInc/crewAI.git@main"
+            tests: tests/adapters/test_crewai_contract.py
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12
+      - run: uv pip install -e ".[dev]" "${{ matrix.spec }}"
+      - run: .venv/bin/python -m pytest -q ${{ matrix.tests }}
+
+  overhead:
+    name: overhead budget (<3% wall, <5MB/1k agents)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12
+      - run: uv pip install -e ".[dev]"
+      - run: .venv/bin/python benchmarks/bench_overhead.py --reps 5 --json | tee bench.json
+      - uses: actions/upload-artifact@v4
+        with: { name: bench, path: bench.json }

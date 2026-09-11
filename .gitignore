@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.db
+*.db-wal
+*.db-shm
+*.duckdb
+.pytest_cache/
+bench.json
+.DS_Store

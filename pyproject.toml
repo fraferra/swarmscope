@@ -1,0 +1,59 @@
+[project]
+name = "swarmscope"
+version = "0.1.0"
+description = "Open, framework-agnostic instrumentation SDK for multi-agent swarms: observability, cost attribution, semantic dedup, and marginal-value evaluation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "swarmscope contributors" }]
+keywords = ["agents", "swarm", "observability", "opentelemetry", "llm", "cost", "dedup", "shapley"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Topic :: Software Development :: Libraries",
+]
+# Core has zero third-party runtime dependencies. Everything else is an extra.
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.40", "httpx>=0.27"]
+langchain = ["langchain-core>=0.2"]
+crewai = ["crewai>=0.60"]
+otlp = ["opentelemetry-api>=1.25", "opentelemetry-sdk>=1.25", "opentelemetry-exporter-otlp-proto-http>=1.25"]
+dashboard = []  # stdlib http.server; no extra deps
+vec = ["sqlite-vec>=0.1.3", "numpy>=1.24"]
+perf = ["orjson>=3.9"]
+duckdb = ["duckdb>=1.0"]
+postgres = ["psycopg[binary]>=3.1", "pgvector>=0.3", "numpy>=1.24"]
+embeddings = ["sentence-transformers>=2.7"]
+all = ["swarmscope[openai,langchain,otlp,vec,perf]"]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "openai>=1.40",
+  "httpx>=0.27",
+  "langchain-core>=0.2",
+  "numpy>=1.24",
+  "psutil>=5.9",
+  "orjson>=3.9",
+  "duckdb>=1.0",
+  "psycopg[binary]>=3.1",
+  "pgvector>=0.3",
+  "langgraph>=0.2",
+]
+
+[project.scripts]
+swarmscope = "swarmscope.surfaces.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/swarmscope"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
