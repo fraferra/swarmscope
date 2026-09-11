@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Iterator, Sequence, TypeVar
 
 from ..attribution.pricing import DEFAULT_PRICING, PricingTable
-from ..claims.embedder import Embedder
+from ..claims.embedder import CachedEmbedder, Embedder, embedder_from_spec
 from ..claims.judge import EquivalenceJudge
 from ..claims.store import ClaimHit, ClaimStore, GatePolicy, Match
 from ..reputation.router import Router, RouterPolicy, RoutingAdvice, agent_identity
@@ -80,7 +80,9 @@ class Swarmscope:
         *,
         pricing: PricingTable | None = None,
         retain_content: bool = True,
-        embedder: Embedder | None = None,
+        embedder: Embedder | str | None = None,
+        embedding_cache: bool = True,
+        warm: bool = True,
         judge: EquivalenceJudge | None = None,
         gate: GatePolicy | None = None,
         experiment: ExperimentConfig | None = None,
@@ -96,8 +98,15 @@ class Swarmscope:
         self.service_name = service_name
         self.buffer = EventBuffer(self.store, batch_size=batch_size, flush_interval=flush_interval,
                                   max_queue=max_queue)
-        self.claims = ClaimStore(self.store, embedder=embedder, judge=judge, policy=gate)
-        self.reputation = Router(self.store, embedder=self.claims.embedder, policy=router)
+        import os
+
+        base_embedder = embedder_from_spec(embedder if embedder is not None else os.environ.get("SWARMSCOPE_EMBEDDER"))
+        self.embedder: Embedder = CachedEmbedder(base_embedder, self.store) if embedding_cache else base_embedder
+        self.claims = ClaimStore(self.store, embedder=self.embedder, judge=judge, policy=gate)
+        self.reputation = Router(self.store, embedder=self.embedder, policy=router)
+        if warm and hasattr(self.embedder, "warmup"):
+            # First call of a local model can cost seconds (weights load); take it off the hot path.
+            threading.Thread(target=self._warm, name="swarmscope-warm", daemon=True).start()
         self.experiment = experiment
         #: artifact_id -> (route, request_id, run_id) for in-process verdict → reputation updates
         self._artifact_meta: dict[str, tuple[tuple[str, ...], str | None, str]] = {}
@@ -107,6 +116,12 @@ class Swarmscope:
         self._lock = threading.Lock()
         self.unknown_lineage_events = 0
         self.total_events = 0
+
+    def _warm(self) -> None:
+        try:
+            self.embedder.warmup()  # type: ignore[attr-defined]
+        except Exception:
+            log.debug("swarmscope: embedder warmup failed", exc_info=True)
 
     # ------------------------------------------------------------------ core
     def emit(self, event: Event) -> None:
@@ -128,6 +143,7 @@ class Swarmscope:
     def flush(self, timeout: float = 5.0) -> None:
         self.buffer.flush(timeout)
         self.claims.drain()
+        self.reputation.drain(timeout)
 
     def close(self) -> None:
         self.buffer.close()
@@ -371,7 +387,8 @@ class Swarmscope:
     # ---------------------------------------------------------------- claims
     def claim(self, text: str, *, kind: str = "hypothesis", status: str = "exploring",
               metadata: dict[str, Any] | None = None, inputs: Sequence[str] | None = None,
-              lookup: bool | None = None, budget_ms: float | None = None, **attrs) -> ClaimHit:
+              lookup: bool | None = None, budget_ms: float | None = None, vector: Sequence[float] | None = None,
+              **attrs) -> ClaimHit:
         """Register a claim and ask "has anyone already tried this?".
 
         Returns a :class:`ClaimHit`. Advisory: nothing is blocked. Under an
@@ -385,9 +402,10 @@ class Swarmscope:
         claim_id = new_id("cl_")
         arm = c.arm if c.arm else (self.experiment.assign(c.agent_id) if self.experiment else None)
         do_lookup = lookup if lookup is not None else (arm != "ungated")
-        vec = None
+        vec = list(vector) if vector is not None else None
         if do_lookup:
-            hit, vec = self.claims.lookup(run_id, claim_id, text, kind, metadata, budget_ms)
+            hit, found = self.claims.lookup(run_id, claim_id, text, kind, metadata, budget_ms, vector=vec)
+            vec = vec if vec is not None else found
         else:
             hit = ClaimHit(claim_id=claim_id)
         hit.arm = arm
@@ -463,7 +481,8 @@ class Swarmscope:
 
     # ---------------------------------------------------------------- requests
     def request(self, text: str, *, kind: str = "request", metadata: dict[str, Any] | None = None,
-                candidates: Sequence[str] | None = None, **attrs) -> RoutingAdvice:
+                candidates: Sequence[str] | None = None, budget_ms: float | None = None,
+                vector: Sequence[float] | None = None, **attrs) -> RoutingAdvice:
         """Ask the reputation router who should handle this work.
 
         Returns :class:`RoutingAdvice` (advisory: routes ranked by a bandit
@@ -479,10 +498,11 @@ class Swarmscope:
         base = self._base(run_level=True)
         req_id = new_id("rq_")
         adv = self.reputation.advise(text, request_id=req_id, kind=kind, metadata=metadata, run_id=base["run_id"],
-                                     candidates=candidates)
+                                     candidates=candidates, budget_ms=budget_ms, vector=vector)
         self.emit(Request(**base, request_id=req_id, text=text, kind=kind, metadata=metadata,
                           advice=adv.to_dict(), attrs=attrs))
-        self.reputation.index_request(base["run_id"], req_id, text, metadata, base["agent_id"], kind=kind)
+        self.reputation.index_request(base["run_id"], req_id, text, metadata, base["agent_id"], kind=kind,
+                                      vector=adv.vector)
 
         def _enter(rid: str):
             c = ctx.current()
@@ -550,6 +570,7 @@ class Swarmscope:
                        "dropped": self.buffer.dropped, "errors": self.buffer.errors},
             "claims": self.claims.judge_stats,
             "reputation": self.reputation.stats,
+            "embedder": getattr(self.embedder, "stats", {"embedder": self.embedder.name}),
             "unpriced_models": dict(self.pricing.unpriced),
         }
 

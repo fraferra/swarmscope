@@ -17,6 +17,7 @@ import logging
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
@@ -69,6 +70,10 @@ class RoutingAdvice:
     cold_start: bool
     latency_ms: float = 0.0
     unit: str = "sequence"
+    #: budget expired: advice is empty (cold_start) and the caller should use its default
+    timed_out: bool = False
+    #: the request embedding (reused for indexing so it is computed once)
+    vector: list[float] | None = field(default=None, repr=False)
     _enter: Any = field(default=None, repr=False)
     _token: Any = field(default=None, repr=False)
 
@@ -102,7 +107,7 @@ class RoutingAdvice:
 
     def to_dict(self) -> dict[str, Any]:
         return {"request_id": self.request_id, "policy": self.policy, "cold_start": self.cold_start,
-                "latency_ms": self.latency_ms, "unit": self.unit,
+                "latency_ms": self.latency_ms, "unit": self.unit, "timed_out": self.timed_out,
                 "routes": [r.to_dict() for r in self.routes[:10]],
                 "similar": [{"request_id": s.request_id, "similarity": s.similarity,
                              "accepted": sum(1 for o in s.outcomes if o.accepted), "outcomes": len(s.outcomes)}
@@ -135,6 +140,8 @@ class RouterPolicy(BanditPolicy):
     unit: str = "sequence"
     #: recall scope: "global" (all runs; the default — reputation is cross-run) or "run"
     scope: str = "global"
+    #: advice budget; on expiry ``advise`` fails open with ``cold_start=True, timed_out=True``
+    latency_budget_ms: float = 250.0
 
 
 class Router:
@@ -145,8 +152,10 @@ class Router:
         self.policy = policy or RouterPolicy()
         self._rng = random.Random(seed)
         self._lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="swarmscope-router")
         self.advised = 0
         self.outcomes_recorded = 0
+        self.timeouts = 0
         #: agent identities this process knows about: the bandit's arms, including untried ones
         self.known_identities: set[str] = set()
 
@@ -155,15 +164,37 @@ class Router:
 
     # ------------------------------------------------------------------ advise
     def advise(self, text: str, *, request_id: str, kind: str = "request", metadata: dict[str, Any] | None = None,
-               run_id: str | None = None, candidates: Iterable[str] | None = None) -> RoutingAdvice:
+               run_id: str | None = None, candidates: Iterable[str] | None = None, budget_ms: float | None = None,
+               vector: Sequence[float] | None = None) -> RoutingAdvice:
         """Rank routes for ``text``. ``candidates`` are agent identities (or full routes as
         ``"a|m| > b|m|"`` strings / tuples) that must be considered even without evidence;
         by default every identity registered in this process is a candidate, so untried
-        agents get explored instead of being invisible to the bandit."""
+        agents get explored instead of being invisible to the bandit.
+
+        Runs under a latency budget and **fails open**: on expiry the advice is a cold
+        start with ``timed_out=True``. Pass ``vector`` to skip embedding entirely."""
         t0 = time.perf_counter()
         p = self.policy
         self.advised += 1
-        vec = self.embedder.embed([text])[0]
+        budget = (budget_ms if budget_ms is not None else p.latency_budget_ms) / 1000.0
+        cands = list(candidates) if candidates is not None else None
+        fut = self._pool.submit(self._advise_sync, text, request_id, kind, run_id, cands,
+                                list(vector) if vector is not None else None)
+        try:
+            adv = fut.result(timeout=budget)
+        except FutTimeout:
+            self.timeouts += 1
+            adv = RoutingAdvice(request_id, text, kind, [], [], p.policy, cold_start=True, unit=p.unit, timed_out=True)
+        except Exception:
+            log.exception("swarmscope: routing advice failed (failing open)")
+            adv = RoutingAdvice(request_id, text, kind, [], [], p.policy, cold_start=True, unit=p.unit, timed_out=True)
+        adv.latency_ms = (time.perf_counter() - t0) * 1000
+        return adv
+
+    def _advise_sync(self, text: str, request_id: str, kind: str, run_id: str | None,
+                     candidates: list | None, vector: list[float] | None) -> RoutingAdvice:
+        p = self.policy
+        vec = vector if vector is not None else self.embedder.embed([text])[0]
         scope_run = run_id if p.scope == "run" else None
         hits = self.store.search_vectors(vec, p.top_k + 1, run_id=scope_run, kind=request_vector_kind(kind))
         hits = [h for h in hits if h.claim_id != request_id and h.score >= p.min_similarity]
@@ -216,9 +247,8 @@ class Router:
                                          (sum(d["sims"]) / len(d["sims"])) if d["sims"] else 0.0))
         scores = [s for s in scores if (s.local_successes + s.local_failures + s.global_successes + s.global_failures) >= p.min_evidence]
         scores.sort(key=lambda s: s.score, reverse=True)
-        adv = RoutingAdvice(request_id, text, kind, scores, similar, p.policy, cold_start=not scores,
-                            latency_ms=(time.perf_counter() - t0) * 1000, unit=p.unit)
-        return adv
+        return RoutingAdvice(request_id, text, kind, scores, similar, p.policy, cold_start=not scores, unit=p.unit,
+                             vector=vec)
 
     def _unit_route(self, route: Sequence[str]) -> list[str]:
         return list(route) if self.policy.unit == "sequence" else list(route[-1:])
@@ -228,12 +258,25 @@ class Router:
 
     # ---------------------------------------------------------------- learning
     def index_request(self, run_id: str, request_id: str, text: str, metadata: dict[str, Any], agent_id: str | None,
-                      vector: list[float] | None = None, kind: str = "request") -> None:
-        vec = vector if vector is not None else self.embedder.embed([text])[0]
-        try:
-            self.store.upsert_vector(run_id, request_id, vec, text, request_vector_kind(kind), metadata, agent_id)
-        except Exception:
-            log.exception("swarmscope: could not index request")
+                      vector: list[float] | None = None, kind: str = "request", wait: bool = False) -> None:
+        """Make the request recallable. Off the hot path: embedding (if needed) and the
+        store write happen on the router's pool unless ``wait=True``."""
+        def _do():
+            try:
+                vec = vector if vector is not None else self.embedder.embed([text])[0]
+                self.store.upsert_vector(run_id, request_id, vec, text, request_vector_kind(kind), metadata, agent_id)
+            except Exception:
+                log.exception("swarmscope: could not index request")
+
+        if wait:
+            _do()
+        else:
+            self._pool.submit(_do)
+
+    def drain(self, timeout: float = 5.0) -> None:
+        """Wait for background indexing to finish (tests, shutdown)."""
+        self._pool.shutdown(wait=True)
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="swarmscope-router")
 
     def record_outcome(self, *, request_id: str, artifact_id: str, run_id: str, route: Sequence[str], accepted: bool,
                        source: str, confidence: float, ts: float | None = None) -> None:
@@ -276,7 +319,7 @@ class Router:
                     if cur is None or e.ts >= cur.ts:
                         latest[e.artifact_id] = e
             for rq in reqs.values():
-                self.index_request(rid, rq.request_id, rq.text, rq.metadata, rq.agent_id, kind=rq.kind)
+                self.index_request(rid, rq.request_id, rq.text, rq.metadata, rq.agent_id, kind=rq.kind, wait=True)
             for art_id, v in latest.items():
                 art = arts.get(art_id)
                 if art is None or not art.request_id or not art.route:
@@ -305,5 +348,5 @@ class Router:
 
     @property
     def stats(self) -> dict[str, Any]:
-        return {"advised": self.advised, "outcomes_recorded": self.outcomes_recorded, "policy": self.policy.policy,
-                "unit": self.policy.unit}
+        return {"advised": self.advised, "outcomes_recorded": self.outcomes_recorded, "timeouts": self.timeouts,
+                "policy": self.policy.policy, "unit": self.policy.unit}

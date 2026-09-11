@@ -7,5 +7,6 @@
   - [LangChain and LangGraph](integrations/langchain.md)
   - [CrewAI](integrations/crewai.md)
 - [Reputation and routing](reputation.md): bandit routing of similar requests to previously successful agents and sequences.
+- [Embedders and latency](embeddings.md): semantic embedders, caching, budgets that fail open.
 - [Storage backends](storage.md): SQLite, DuckDB, Postgres/pgvector; sharing a store across processes.
 - [Validation protocol](validation.md) and [results](results.md): reference workloads and the value-vs-k curves.

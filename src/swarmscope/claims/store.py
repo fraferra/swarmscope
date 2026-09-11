@@ -202,14 +202,14 @@ class ClaimStore:
 
     # --- read path (budgeted, fails open) ---------------------------------
     def lookup(self, run_id: str, claim_id: str, text: str, kind: str, metadata: dict[str, Any],
-               budget_ms: float | None = None) -> tuple[ClaimHit, list[float] | None]:
+               budget_ms: float | None = None, vector: list[float] | None = None) -> tuple[ClaimHit, list[float] | None]:
         t0 = time.perf_counter()
         hit = ClaimHit(claim_id=claim_id)
         if self.policy.mode == "off":
             return hit, None
         self.lookups += 1
         budget = (budget_ms if budget_ms is not None else self.policy.latency_budget_ms) / 1000.0
-        fut = self._pool.submit(self._lookup_sync, run_id, text, kind, metadata, hit, t0 + budget)
+        fut = self._pool.submit(self._lookup_sync, run_id, text, kind, metadata, hit, t0 + budget, vector)
         vec: list[float] | None = None
         try:
             vec = fut.result(timeout=budget)
@@ -222,11 +222,12 @@ class ClaimStore:
         hit.latency_ms = (time.perf_counter() - t0) * 1000
         return hit, vec
 
-    def _lookup_sync(self, run_id, text, kind, metadata, hit: ClaimHit, deadline: float) -> list[float]:
+    def _lookup_sync(self, run_id, text, kind, metadata, hit: ClaimHit, deadline: float,
+                     vector: list[float] | None = None) -> list[float]:
         p = self.policy
         if self._pending:  # read-your-writes: claims recorded moments ago must be searchable now
             self.drain()
-        vec = self.embedder.embed([text])[0]
+        vec = vector if vector is not None else self.embedder.embed([text])[0]
         scope_run = run_id if p.scope == "run" else None
         cands: list[VectorHit] = self.store.search_vectors(vec, p.top_k + 1, run_id=scope_run, kind=kind)
         cands = [c for c in cands if c.claim_id != hit.claim_id]

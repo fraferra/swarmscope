@@ -5,10 +5,12 @@ A Thompson-sampling dispatcher uses ``sdk.request`` advice; a random
 dispatcher ignores it. Both are scored by a verifier. Watch the routed
 acceptance rate climb over rounds while the random one stays flat.
 
-    python examples/reputation_routing.py
+    python examples/reputation_routing.py                 # lexical hash embedder (default)
+    python examples/reputation_routing.py --embedder model2vec   # semantic, ~0.05 ms/text
 """
 from __future__ import annotations
 
+import argparse
 import random
 
 import swarmscope as ss
@@ -26,9 +28,9 @@ SKILL = {
 }
 
 
-def run(policy: str | None, rounds: int = 12, per_round: int = 30, seed: int = 0) -> list[float]:
+def run(policy: str | None, rounds: int = 12, per_round: int = 30, seed: int = 0, embedder: str = "hash") -> list[float]:
     rng = random.Random(seed)
-    sdk = ss.Swarmscope("memory://", router=ss.RouterPolicy(policy=policy or "thompson"))
+    sdk = ss.Swarmscope("memory://", router=ss.RouterPolicy(policy=policy or "thompson"), embedder=embedder)
     specialists = {name: sdk.agent(role=name, model="m")(lambda req, n=name: n) for name in SKILL}
     rates = []
     with sdk.run(f"routing-{policy or 'random'}"):
@@ -54,9 +56,13 @@ def run(policy: str | None, rounds: int = 12, per_round: int = 30, seed: int = 0
 
 
 if __name__ == "__main__":
-    random_rates = run(None)
-    ts_rates = run("thompson")
-    ucb_rates = run("ucb")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--embedder", default="hash", help="hash | model2vec[:model] | st:<model> | openai[:model]")
+    a = ap.parse_args()
+    random_rates = run(None, embedder=a.embedder)
+    ts_rates = run("thompson", embedder=a.embedder)
+    ucb_rates = run("ucb", embedder=a.embedder)
+    print(f"embedder: {a.embedder}")
     print("round   random  thompson  ucb")
     for i, (a, b, c) in enumerate(zip(random_rates, ts_rates, ucb_rates), 1):
         print(f"{i:>5}   {a:.2f}    {b:.2f}      {c:.2f}")

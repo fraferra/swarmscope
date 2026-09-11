@@ -22,6 +22,7 @@ pip install "swarmscope[crewai]"      # CrewAI event-bus adapter
 pip install "swarmscope[otlp]"        # OTLP export to Grafana / Datadog / Langfuse
 pip install "swarmscope[duckdb]"      # DuckDB store
 pip install "swarmscope[postgres]"    # Postgres/pgvector store: the shared store for multi-process swarms
+pip install "swarmscope[model2vec]"   # low-latency semantic embedder for dedup and routing
 ```
 
 Integration guides: [OpenAI SDK / Agents SDK](docs/integrations/openai.md) · [LangChain / LangGraph](docs/integrations/langchain.md) · [CrewAI](docs/integrations/crewai.md) · [storage backends](docs/storage.md) · [all docs](docs/README.md)
@@ -116,7 +117,7 @@ Read path: 200 ms budget, fails open. Write path: fire-and-forget. Judge verdict
 
 The store is the coordination substrate: point every process at the same SQLite file or Postgres database and `sdk.claim()` sees what other processes registered moments ago, with no messaging between workers. `sdk.search_claims()` and `swarmscope claims -q` query it without registering anything. See `examples/multiprocess_swarm.py`.
 
-The default embedder is a dependency-free feature-hash — lexical, deterministic, weak. Use `OpenAIEmbedder` / `SentenceTransformerEmbedder` for semantic recall.
+The default embedder is a dependency-free feature-hash — lexical, deterministic, weak. For semantic recall pass `embedder="model2vec"` (~50 µs per text, no torch), `"st:<model>"`, `"openai:<model>"`, or your own. Every embedder is cached in memory and in the store, and every lookup runs under a budget that fails open, so a slow embedder costs recall, never swarm latency. See [docs/embeddings.md](docs/embeddings.md).
 
 ### L3 — P(success) vs k, never a mean
 

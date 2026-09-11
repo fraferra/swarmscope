@@ -20,8 +20,8 @@ from __future__ import annotations
 from ._version import __version__
 from .attribution import (DEFAULT_PRICING, CostReport, LineageGraph, PricingTable, Rate, SelfHosted, WasteReport,
                           cost_rollup, infer_downstream_verdicts, waste_report)
-from .claims import (CallableEmbedder, CallableJudge, ClaimHit, GatePolicy, HashEmbedder, Match, OpenAIEmbedder,
-                     OpenAIJudge)
+from .claims import (CachedEmbedder, CallableEmbedder, CallableJudge, ClaimHit, GatePolicy, HashEmbedder, Match,
+                     Model2VecEmbedder, OpenAIEmbedder, OpenAIJudge, SentenceTransformerEmbedder, embedder_from_spec)
 from .core import (UNKNOWN, ArtifactRef, Contribution, ExperimentConfig, RunHandle, Swarmscope, context,
                    contributions_from)
 from .core.events import (AgentEnd, AgentStart, Artifact, Claim, Consolidation, Event, Generation, Message,
@@ -107,6 +107,7 @@ __all__ = [
     "SQLiteStore", "open_store", "PricingTable", "Rate", "SelfHosted", "DEFAULT_PRICING", "LineageGraph",
     "CostReport", "WasteReport", "cost_rollup", "waste_report", "infer_downstream_verdicts", "ClaimHit", "Match",
     "GatePolicy", "HashEmbedder", "CallableEmbedder", "OpenAIEmbedder", "CallableJudge", "OpenAIJudge",
+    "CachedEmbedder", "Model2VecEmbedder", "SentenceTransformerEmbedder", "embedder_from_spec",
     "ReplayHarness", "AblationCurve", "ablate", "ShapleyResult", "shapley", "ProxyReport", "online_proxies",
     "Calibration", "request", "Router", "RouterPolicy", "RouteScore", "RoutingAdvice",
 ]

@@ -69,6 +69,6 @@ sdk = ss.init(store, router=RouterPolicy(policy="thompson", unit="sequence", pri
 
 - It does not reroute anything itself. There is no hook that overrides your dispatch; you read the advice.
 - It does not know *why* a route succeeded. If two routes differ only by a prompt you did not put in `config`, they share an identity and their outcomes are pooled. Put what matters into `config` (hashed into the identity) or set `identity` explicitly.
-- Similarity is only as good as the embedder. The default hash embedder is lexical; for real semantic recall use `OpenAIEmbedder` or `SentenceTransformerEmbedder` (the router shares the claim store's embedder).
+- Similarity is only as good as the embedder. The default hash embedder is lexical (paraphrases score ~0.1); `embedder="model2vec"` gives semantic recall at ~50 µs per text. The router shares the SDK's cached embedder and runs under `latency_budget_ms` (default 250), failing open to a cold start with `timed_out=True`. See [embeddings.md](embeddings.md).
 
 `examples/reputation_routing.py` runs a simulated swarm where a Thompson-sampling dispatcher learns which specialist to route each request type to, and prints the acceptance rate per round against a random dispatcher.
