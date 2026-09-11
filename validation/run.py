@@ -25,18 +25,25 @@ from .workloads import SOLVERS, WORKLOADS, Workload
 
 
 def run_swarm(sdk: ss.Swarmscope, workload: Workload, solver, k: int, seed: int, *, task_idx: int = 0,
-              experiment: bool = False) -> tuple[str, bool | float, dict[str, Any]]:
+              experiment: bool = False, workers: int = 1) -> tuple[str, bool | float, dict[str, Any]]:
+    """One swarm of k agents on one task. ``workers > 1`` runs agents concurrently (each on a copy
+    of the current context so lineage stays correct); agent seeds are fixed up front so results
+    do not depend on scheduling."""
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
     task = workload.tasks[task_idx % len(workload.tasks)]
     rng = random.Random(seed)
     consolidate = sdk.consolidator(name=f"{workload.name}-consolidate", check_determinism=True)(workload.consolidate)
-    contribs: list[ss.Contribution] = []
     with sdk.run(f"{workload.name}-k{k}-s{seed}", workload=workload.name,
                  meta={"k": k, "seed": seed, "task": task.task_id, "solver": solver.name}) as run:
         groups = max(1, min(10, k // 5))
-        for i in range(k):
+        seeds = [rng.random() for _ in range(k)]
+
+        def one(i: int) -> ss.Contribution:
             with sdk.group(f"g{i % groups}"):
                 with sdk.agent_scope(role="solver") as aid:
-                    out = solver.solve(workload, task, random.Random(rng.random()), sdk)
+                    out = solver.solve(workload, task, random.Random(seeds[i]), sdk)
                     art = sdk.artifact(out, kind="candidate")
                     accepted = None
                     if workload.check is not None:
@@ -45,7 +52,14 @@ def run_swarm(sdk: ss.Swarmscope, workload: Workload, solver, k: int, seed: int,
                         sdk.verdict(art, status="accepted" if accepted else "rejected", source=workload.verdict_source,
                                     confidence=1.0 if workload.verdict_source == "verifier" else 0.8)
                     value = dict(out, accepted=accepted) if isinstance(out, dict) else out
-                    contribs.append(ss.Contribution(aid, value, f"g{i % groups}"))
+                    return ss.Contribution(aid, value, f"g{i % groups}")
+
+        if workers > 1 and k > 1:
+            ctx_ = contextvars.copy_context()
+            with ThreadPoolExecutor(min(workers, k)) as pool:
+                contribs = list(pool.map(lambda i: ctx_.copy().run(one, i), range(k)))
+        else:
+            contribs = [one(i) for i in range(k)]
         final = consolidate(contribs)
         score = workload.score(task, final)
         if workload.name == "fuzzy":  # no human in the loop here: label the proxy honestly
@@ -105,6 +119,7 @@ def main(argv=None) -> int:
     ap.add_argument("--model", default=None, help="model for the openai solver (default gpt-4o-mini)")
     ap.add_argument("--max-usd", type=float, default=5.0, help="abort before starting if the estimate exceeds this")
     ap.add_argument("--yes", action="store_true", help="skip the cost confirmation for the openai solver")
+    ap.add_argument("--workers", type=int, default=None, help="concurrent agents per swarm (default 16 for openai, 1 otherwise)")
     a = ap.parse_args(argv)
 
     ks = [int(x) for x in a.ks.split(",")]
@@ -122,8 +137,9 @@ def main(argv=None) -> int:
         solver = SOLVERS["openai"](a.model)
     else:
         solver = SOLVERS[a.solver]()
+    workers = a.workers if a.workers is not None else (16 if a.solver == "openai" else 1)
     results: dict[str, Any] = {"solver": a.solver, "model": getattr(solver, "model", None), "ks": ks, "reps": a.reps,
-                               "workloads": {}}
+                               "workers": workers, "workloads": {}}
     t_all = time.time()
     done_calls = 0
     for name in names:
@@ -136,7 +152,7 @@ def main(argv=None) -> int:
             for r in range(a.reps):
                 seed = a.seed * 1000 + k * 10 + r
                 t_run = time.time()
-                rid, score, _ = run_swarm(sdk, wl, solver, k, seed, task_idx=r)
+                rid, score, _ = run_swarm(sdk, wl, solver, k, seed, task_idx=r, workers=workers)
                 cost = ss.cost_rollup(sdk.store, rid).totals["cost_usd"]
                 prospective.setdefault(k, []).append(float(score))
                 costs.setdefault(k, []).append(cost)
@@ -156,7 +172,7 @@ def main(argv=None) -> int:
 
         # dedup experiment: gated vs ungated arms on the largest k
         exp_sdk = ss.Swarmscope(a.store, gate=ss.GatePolicy(threshold=0.85), experiment=ss.ExperimentConfig())
-        rid_exp, _, _ = run_swarm(exp_sdk, wl, solver, max(ks), a.seed + 999)
+        rid_exp, _, _ = run_swarm(exp_sdk, wl, solver, max(ks), a.seed + 999, workers=workers)
         arms = arm_report(exp_sdk.store, rid_exp, wl.verdict_source)
         exp_sdk.close()
 
