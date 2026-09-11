@@ -213,9 +213,9 @@ def write_report(res: dict[str, Any], path: str) -> None:
         L.append("\nThe gate is advisory: gated-arm agents skipped ~70% of duplicate approaches. Compare accepted "
                  "artifacts and cost per accepted between arms; a gate that lowers the first is net-harmful on this workload.")
         px = w["proxies"]
-        L.append(f"\nOnline proxies on the largest run: dedup hit rate "
-                 f"{'—' if px['dedup_hit_rate'] is None else f'{px['dedup_hit_rate']:.0%}'}, coverage entropy "
-                 f"{'—' if px['coverage_entropy'] is None else f'{px['coverage_entropy']:.2f}'}, "
+        hit_rate = "—" if px["dedup_hit_rate"] is None else f"{px['dedup_hit_rate']:.0%}"
+        entropy = "—" if px["coverage_entropy"] is None else f"{px['coverage_entropy']:.2f}"
+        L.append(f"\nOnline proxies on the largest run: dedup hit rate {hit_rate}, coverage entropy {entropy}, "
                  f"unknown lineage {px['unknown_lineage_fraction']:.1%}.")
     L.append("\n## Reading these numbers\n")
     L.append("- Everything is P(success) with a CI, never a mean alone: swarm search is heavy-tailed and a team that "
