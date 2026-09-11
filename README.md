@@ -67,6 +67,7 @@ swarmscope cost --by group  # rollup agent → group → run, per-model breakdow
 swarmscope waste            # waste ratio + cost-per-accepted-artifact distribution, by verdict source
 swarmscope dedup            # dedup hit rate over time, judge calls/claim, experiment arms
 swarmscope claims -q "..."  # semantic search over the claim store (add --all-runs for cross-run memory)
+swarmscope reputation       # route reputation leaderboard; -q "..." for routing advice
 swarmscope review           # CLI verdict queue for artifacts with no verdict
 swarmscope ablate --consolidator mymod:consolidate --scorer mymod:score --shapley
 swarmscope serve            # local dashboard on :8765
@@ -120,6 +121,17 @@ The default embedder is a dependency-free feature-hash — lexical, deterministi
 ### L3 — P(success) vs k, never a mean
 
 Swarm search is heavy-tailed. Every curve reports P(success) with Wilson CIs and score quantiles; means are present but never the headline. Ablation needs a replayable consolidation (`@sdk.consolidator` records inputs/outputs verbatim and can check determinism); when it is not replayable the harness says so and you fall back to online proxies. Replay fidelity (full-set replay vs original) is reported on every curve.
+
+### Reputation: route similar requests to whoever handled them well
+
+```python
+with sdk.request("translate this clause to French", kind="translation") as adv:
+    agent = pick(adv.recommended_agent) if not adv.cold_start else default_agent   # your call
+    art = sdk.artifact(agent(...))
+    sdk.verdict(art, status=..., source="verifier")     # updates the route's reputation
+```
+
+Every route (the sequence of stable agent identities that produced an artifact) is a bandit arm with a Beta posterior learned from verdicts on similar past requests, plus its global record as a prior. Thompson sampling by default, so untried agents get explored; UCB and greedy available. Advisory, with credible intervals on every score. `swarmscope reputation` shows the leaderboard. See [docs/reputation.md](docs/reputation.md) and `examples/reputation_routing.py`.
 
 ## Adapters
 

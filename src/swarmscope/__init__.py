@@ -25,9 +25,10 @@ from .claims import (CallableEmbedder, CallableJudge, ClaimHit, GatePolicy, Hash
 from .core import (UNKNOWN, ArtifactRef, Contribution, ExperimentConfig, RunHandle, Swarmscope, context,
                    contributions_from)
 from .core.events import (AgentEnd, AgentStart, Artifact, Claim, Consolidation, Event, Generation, Message,
-                          Suppression, ToolCall, Verdict)
+                          Request, Suppression, ToolCall, Verdict)
 from .evaluation import (AblationCurve, Calibration, ProxyReport, ReplayHarness, ShapleyResult, ablate,
                          online_proxies, shapley)
+from .reputation import Router, RouterPolicy, RouteScore, RoutingAdvice
 from .store import MemoryStore, SQLiteStore, Store, open_store
 
 _global: Swarmscope | None = None
@@ -94,6 +95,10 @@ def consolidator(*a, **kw):
     return get().consolidator(*a, **kw)
 
 
+def request(*a, **kw):
+    return get().request(*a, **kw)
+
+
 __all__ = [
     "__version__", "init", "get", "Swarmscope", "run", "agent", "tool", "claim", "artifact", "verdict", "message",
     "link", "generation", "consolidator", "UNKNOWN", "ArtifactRef", "Contribution", "ExperimentConfig",
@@ -103,5 +108,5 @@ __all__ = [
     "CostReport", "WasteReport", "cost_rollup", "waste_report", "infer_downstream_verdicts", "ClaimHit", "Match",
     "GatePolicy", "HashEmbedder", "CallableEmbedder", "OpenAIEmbedder", "CallableJudge", "OpenAIJudge",
     "ReplayHarness", "AblationCurve", "ablate", "ShapleyResult", "shapley", "ProxyReport", "online_proxies",
-    "Calibration",
+    "Calibration", "request", "Router", "RouterPolicy", "RouteScore", "RoutingAdvice",
 ]

@@ -41,6 +41,7 @@ small{color:#9aa4b2}
 <div class="card"><h3>Dedup hit rate over time</h3><svg id="heat" width="460" height="140"></svg><small id="heatnote"></small></div>
 <div class="card"><h3>Value vs k (P(success), 95% CI)</h3><svg id="curve" width="460" height="260"></svg><small id="curvenote"></small></div>
 <div class="card full"><h3>Per-source verdicts &amp; waste</h3><div id="sources"></div></div>
+<div class="card full"><h3>Route reputation (store-wide; P(success) with 95% CI)</h3><div id="rep"></div></div>
 </main>
 <script>
 const $=s=>document.querySelector(s);const fmt=(x,d=2)=>x==null?'—':(typeof x==='number'?x.toFixed(d):x);
@@ -57,7 +58,9 @@ async function show(id){const [cost,waste,prox,curve]=await Promise.all([j('/api
  <div><small>dedup hit rate</small><b>${prox.dedup_hit_rate==null?'—':(prox.dedup_hit_rate*100).toFixed(0)+'%'}</b></div>
  <div><small>coverage entropy</small><b>${fmt(prox.coverage_entropy)}</b></div><div><small>unpriced gens</small><b class="${cost.unpriced_generations?'warn':''}">${cost.unpriced_generations}</b></div>`;
  const w=[...(prox.warnings||[])];if(!waste.defined)w.push(waste.reason);$('#warnings').innerHTML=w.map(x=>`<div class="warn">⚠ ${x}</div>`).join('');
- tree(cost.tree);sunburst(cost.tree,t.cost_usd);heat(prox.dedup_hit_rate_over_time);curveChart(curve);sources(waste)}
+ tree(cost.tree);sunburst(cost.tree,t.cost_usd);heat(prox.dedup_hit_rate_over_time);curveChart(curve);sources(waste);reputation()}
+async function reputation(){const r=await j('/api/reputation');const el=$('#rep');if(!r.leaderboard||!r.leaderboard.length){el.innerHTML='<small>no reputation yet — wrap work in <code>with sdk.request(...)</code> and emit verdicts</small>';return}
+ el.innerHTML=`<table style="border-collapse:collapse"><tr><th align=left>route</th><th>P(success)</th><th>95% CI</th><th>evidence</th></tr>${r.leaderboard.map(x=>`<tr><td>${x.route.join(' → ')}</td><td align=center>${x.mean.toFixed(2)}</td><td align=center>[${x.ci_low.toFixed(2)}, ${x.ci_high.toFixed(2)}]</td><td align=center>${(x.global_successes+x.global_failures).toFixed(1)}</td></tr>`).join('')}</table>`}
 function tree(nodes){const el=$('#tree');el.innerHTML='';const build=(ns)=>{const ul=document.createElement('ul');ul.className='tree';
  for(const n of ns){const li=document.createElement('li');li.innerHTML=`${n.children.length?'▸ ':'• '}${n.name} <span class="cost">$${fmt(n.subtree_cost_usd,4)} · ${n.subtree_tokens} tok${n.group_id?' · '+n.group_id:''}</span>`;
  if(n.children.length){const c=build(n.children);c.style.display='none';li.appendChild(c);li.onclick=e=>{e.stopPropagation();c.style.display=c.style.display==='none'?'':'none'}}ul.appendChild(li)}return ul};el.appendChild(build(nodes))}
@@ -116,6 +119,12 @@ def make_handler(store: Store):
                     return
                 if parts[:2] == ["api", "runs"]:
                     return self._json([r.to_dict() for r in store.runs()])
+                if parts[:2] == ["api", "reputation"]:
+                    from ..reputation import Router
+
+                    q = parse_qs(u.query)
+                    lb = Router(store).leaderboard(limit=25, unit=q.get("unit", ["sequence"])[0])
+                    return self._json({"leaderboard": [r.to_dict() for r in lb]})
                 if parts[:2] == ["api", "run"] and len(parts) == 4:
                     run_id, what = parts[2], parts[3]
                     g = LineageGraph(store.events(run_id))

@@ -24,7 +24,7 @@ UNKNOWN = "unknown"
 
 EventType = Literal[
     "agent_start", "agent_end", "generation", "message", "tool_call",
-    "claim", "artifact", "verdict", "consolidation", "suppression",
+    "claim", "artifact", "verdict", "consolidation", "suppression", "request",
 ]
 
 VerdictStatus = Literal["accepted", "rejected", "pending"]
@@ -151,6 +151,10 @@ class Artifact(Event):
     #: Ids (artifacts, claims, messages, agents) this artifact was derived from.
     inputs: list[str] = field(default_factory=list)
     size_bytes: int | None = None
+    #: Stable agent identities from the run root to the producer (the "route").
+    route: list[str] = field(default_factory=list)
+    #: Request this artifact answers, if produced under ``sdk.request``.
+    request_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -182,6 +186,19 @@ class Consolidation(Event):
 
 
 @dataclass(slots=True)
+class Request(Event):
+    """A unit of work being routed: "who should handle this?" (reputation layer)."""
+
+    type: ClassVar[str] = "request"
+    request_id: str = field(default_factory=lambda: new_id("rq_"))
+    text: str = ""
+    kind: str = "request"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    #: Routing advice summary recorded alongside (top routes, policy, cold_start).
+    advice: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class Suppression(Event):
     """Logged every time a caller acts on dedup advice by skipping work."""
 
@@ -194,19 +211,19 @@ class Suppression(Event):
 
 _FIELD_ACCESS: dict[type, tuple[tuple[str, ...], Any]] = {}
 for _cls in (Event, AgentStart, AgentEnd, Generation, Message, ToolCall, Claim, Artifact, Verdict, Consolidation,
-             Suppression):
+             Suppression, Request):
     _names = tuple(f.name for f in fields(_cls))
     _FIELD_ACCESS[_cls] = (_names, attrgetter(*_names))
 
 EVENT_TYPES: dict[str, type[Event]] = {
     c.type: c
     for c in (AgentStart, AgentEnd, Generation, Message, ToolCall, Claim,
-              Artifact, Verdict, Consolidation, Suppression)
+              Artifact, Verdict, Consolidation, Suppression, Request)
 }
 
 __all__ = [
     "UNKNOWN", "Event", "AgentStart", "AgentEnd", "Generation", "Message",
-    "ToolCall", "Claim", "Artifact", "Verdict", "Consolidation", "Suppression",
+    "ToolCall", "Claim", "Artifact", "Verdict", "Consolidation", "Suppression", "Request",
     "EVENT_TYPES", "EventType", "VerdictStatus", "VerdictSource", "ClaimKind",
     "ClaimStatus",
 ]

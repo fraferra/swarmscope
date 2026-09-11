@@ -7,7 +7,7 @@ import time
 from typing import Any, Iterable, Sequence
 
 from ..core.events import Event
-from .base import RunInfo, VectorHit, cosine
+from .base import RouteOutcome, RouteStat, RunInfo, VectorHit, cosine
 
 
 class MemoryStore:
@@ -18,6 +18,8 @@ class MemoryStore:
         self._vectors: dict[str, dict[str, Any]] = {}
         self._judge: dict[str, dict[str, Any]] = {}
         self._calib: dict[str, dict[str, Any]] = {}
+        self._outcomes: dict[tuple[str, str], RouteOutcome] = {}
+        self._routes: dict[str, RouteStat] = {}
 
     # runs
     def begin_run(self, run_id, name, started_at, meta):
@@ -99,6 +101,38 @@ class MemoryStore:
 
     def judge_cache_put(self, key, value):
         self._judge[key] = dict(value, ts=time.time())
+
+    # reputation
+    def route_outcomes_put(self, rows):
+        with self._lock:
+            for r in rows:
+                self._outcomes[(r.request_id, r.artifact_id)] = r
+
+    def route_outcomes(self, request_ids=None, limit=None):
+        ids = set(request_ids) if request_ids is not None else None
+        with self._lock:
+            out = [o for o in self._outcomes.values() if ids is None or o.request_id in ids]
+        out.sort(key=lambda o: o.ts, reverse=True)
+        return out[:limit] if limit else out
+
+    def route_stats_add(self, route_key, route, success, failure, ts):
+        with self._lock:
+            st = self._routes.get(route_key)
+            if st is None:
+                st = self._routes[route_key] = RouteStat(route_key, list(route), 0.0, 0.0, ts)
+            st.successes += success
+            st.failures += failure
+            st.last_ts = max(st.last_ts, ts)
+
+    def route_stats(self, limit=None):
+        with self._lock:
+            out = sorted(self._routes.values(), key=lambda s: (s.successes / (s.n or 1), s.n), reverse=True)
+        return out[:limit] if limit else out
+
+    def route_stats_clear(self):
+        with self._lock:
+            self._routes.clear()
+            self._outcomes.clear()
 
     # calibrations
     def calibration_get(self, workload):

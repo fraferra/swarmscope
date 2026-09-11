@@ -36,6 +36,34 @@ class VectorHit:
     agent_id: str | None = None
 
 
+@dataclass(slots=True)
+class RouteOutcome:
+    """One verdict, attributed to the route that produced the artifact."""
+
+    request_id: str
+    artifact_id: str
+    run_id: str
+    route_key: str
+    route: list[str]
+    accepted: bool
+    weight: float
+    ts: float
+    source: str = ""
+
+
+@dataclass(slots=True)
+class RouteStat:
+    route_key: str
+    route: list[str]
+    successes: float
+    failures: float
+    last_ts: float
+
+    @property
+    def n(self) -> float:
+        return self.successes + self.failures
+
+
 @runtime_checkable
 class Store(Protocol):
     """Every method must be safe to call from any thread."""
@@ -75,6 +103,13 @@ class Store(Protocol):
     # --- judge cache (L2) --------------------------------------------
     def judge_cache_get(self, key: str) -> dict[str, Any] | None: ...
     def judge_cache_put(self, key: str, value: dict[str, Any]) -> None: ...
+
+    # --- reputation (routes) -----------------------------------------
+    def route_outcomes_put(self, rows: Sequence["RouteOutcome"]) -> None: ...
+    def route_outcomes(self, request_ids: Iterable[str] | None = None, limit: int | None = None) -> list["RouteOutcome"]: ...
+    def route_stats_add(self, route_key: str, route: Sequence[str], success: float, failure: float, ts: float) -> None: ...
+    def route_stats(self, limit: int | None = None) -> list["RouteStat"]: ...
+    def route_stats_clear(self) -> None: ...
 
     # --- calibrations (L3) -------------------------------------------
     def calibration_get(self, workload: str) -> dict[str, Any] | None: ...

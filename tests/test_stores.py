@@ -70,6 +70,22 @@ def test_store_scenario(store):
     assert store.calibration_get("w") == {"a": 1}
     rep = ss.waste_report(store, run.run_id)
     assert rep.defined and rep.waste_ratio == 0.0
+    # reputation tables
+    from swarmscope.store.base import RouteOutcome
+
+    store.route_outcomes_put([RouteOutcome("rq1", "ar1", run.run_id, "k1", ["a|m|"], True, 1.0, 1.0, "verifier")])
+    store.route_outcomes_put([RouteOutcome("rq1", "ar1", run.run_id, "k1", ["a|m|"], False, 0.5, 2.0, "human")])  # upsert
+    outs = store.route_outcomes(["rq1"])
+    assert len(outs) == 1 and outs[0].accepted is False and outs[0].weight == 0.5 and outs[0].route == ["a|m|"]
+    assert store.route_outcomes([]) == [] and len(store.route_outcomes()) == 1
+    store.route_stats_add("k1", ["a|m|"], 1.0, 0.0, 1.0)
+    store.route_stats_add("k1", ["a|m|"], 0.0, 0.5, 3.0)
+    store.route_stats_add("k2", ["b|m|"], 0.0, 1.0, 1.0)
+    st = store.route_stats()
+    assert [x.route_key for x in st] == ["k1", "k2"] and st[0].successes == 1.0 and st[0].failures == 0.5 and st[0].last_ts == 3.0
+    assert store.route_stats(limit=1)[0].route_key == "k1"
+    store.route_stats_clear()
+    assert store.route_stats() == [] and store.route_outcomes() == []
     sdk.buffer.close()
     sdk.claims.close()
 

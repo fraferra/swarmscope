@@ -206,6 +206,43 @@ def cmd_claims(a):
         print(f"  {flag}{c.claim_id}  [{c.kind}/{c.status}] {c.text[:90]}  top={d.get('top_score', 0):.2f} agent={c.agent_id}")
 
 
+def cmd_reputation(a):
+    """Route reputation leaderboard, or routing advice for a query."""
+    import swarmscope as ss
+    from swarmscope.reputation import RouterPolicy
+
+    store = open_store(a.store)
+    sdk = ss.Swarmscope(store, router=RouterPolicy(policy=a.policy, unit=a.unit))
+    try:
+        if a.rebuild:
+            n = sdk.reputation.rebuild()
+            print(f"rebuilt reputation from the event log: {n} outcomes")
+        if a.query:
+            adv = sdk.reputation.advise(a.query, request_id="_cli", kind="request")
+            if a.json:
+                return _out(adv.to_dict(), True)
+            print(f"routing advice ({adv.policy}, {adv.unit}; {len(adv.similar)} similar past requests"
+                  f"{'; cold start' if adv.cold_start else ''}):")
+            for r in adv.routes[: a.limit]:
+                print(f"  score={r.score:.3f} mean={r.mean:.2f} [{r.ci_low:.2f},{r.ci_high:.2f}] "
+                      f"local={r.local_successes:.1f}/{r.n:.1f} global={r.global_successes:.1f}/"
+                      f"{r.global_successes + r.global_failures:.1f} sim={r.mean_similarity:.2f}  {' → '.join(r.route)}")
+            return
+        lb = sdk.reputation.leaderboard(limit=a.limit, unit=a.unit)
+        if a.json:
+            return _out({"unit": a.unit, "leaderboard": [r.to_dict() for r in lb]}, True)
+        if not lb:
+            print("no reputation yet: wrap work in `with sdk.request(...)` and emit verdicts")
+            return
+        print(f"route reputation ({a.unit}); P(success) with 95% CI, evidence-weighted:")
+        for r in lb:
+            print(f"  {r.mean:.2f} [{r.ci_low:.2f},{r.ci_high:.2f}]  n={r.global_successes + r.global_failures:5.1f}  "
+                  f"{' → '.join(r.route)}")
+    finally:
+        sdk.buffer.close()
+        sdk.claims.close()
+
+
 def cmd_proxies(a):
     store = open_store(a.store)
     rid = _resolve_run(store, a.run)
@@ -345,6 +382,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("claims", help="list claims or semantic-search the claim store"); common(s)
     s.add_argument("--query", "-q"); s.add_argument("--kind"); s.add_argument("--all-runs", action="store_true")
     s.set_defaults(fn=cmd_claims)
+    s = sub.add_parser("reputation", help="route reputation (bandit over past verdicts)"); common(s, run=False)
+    s.add_argument("--query", "-q"); s.add_argument("--unit", choices=["sequence", "agent"], default="sequence")
+    s.add_argument("--policy", choices=["thompson", "ucb", "greedy"], default="greedy")
+    s.add_argument("--rebuild", action="store_true", help="recompute from the event log (after post-hoc verdicts)")
+    s.set_defaults(fn=cmd_reputation)
     s = sub.add_parser("proxies", help="online proxies"); common(s)
     s.add_argument("--window", type=float, default=60.0); s.set_defaults(fn=cmd_proxies)
     s = sub.add_parser("ablate", help="retrospective ablation via replay (+ optional Shapley)"); common(s)

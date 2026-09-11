@@ -29,11 +29,12 @@ from ..attribution.pricing import DEFAULT_PRICING, PricingTable
 from ..claims.embedder import Embedder
 from ..claims.judge import EquivalenceJudge
 from ..claims.store import ClaimHit, ClaimStore, GatePolicy, Match
+from ..reputation.router import Router, RouterPolicy, RoutingAdvice, agent_identity
 from ..store.base import Store, open_store
 from . import context as ctx
 from .buffer import EventBuffer
 from .events import (UNKNOWN, AgentEnd, AgentStart, Artifact, Claim, Consolidation, Event,
-                     Generation, Message, Suppression, ToolCall, Verdict)
+                     Generation, Message, Request, Suppression, ToolCall, Verdict)
 from .ids import config_hash, hash_bytes, new_id, stable_hash
 
 log = logging.getLogger("swarmscope")
@@ -83,6 +84,7 @@ class Swarmscope:
         judge: EquivalenceJudge | None = None,
         gate: GatePolicy | None = None,
         experiment: ExperimentConfig | None = None,
+        router: RouterPolicy | None = None,
         service_name: str = "swarmscope",
         batch_size: int = 256,
         flush_interval: float = 0.25,
@@ -95,7 +97,10 @@ class Swarmscope:
         self.buffer = EventBuffer(self.store, batch_size=batch_size, flush_interval=flush_interval,
                                   max_queue=max_queue)
         self.claims = ClaimStore(self.store, embedder=embedder, judge=judge, policy=gate)
+        self.reputation = Router(self.store, embedder=self.claims.embedder, policy=router)
         self.experiment = experiment
+        #: artifact_id -> (route, request_id, run_id) for in-process verdict → reputation updates
+        self._artifact_meta: dict[str, tuple[tuple[str, ...], str | None, str]] = {}
         self._consolidators: dict[str, Callable[..., Any]] = {}
         self._exporters: list[Callable[[Event], None]] = []
         self._default_run: RunHandle | None = None
@@ -199,20 +204,26 @@ class Swarmscope:
     @contextmanager
     def agent_scope(self, *, role: str | None = None, group: str | None = None, model: str | None = None,
                     config: dict[str, Any] | None = None, name: str | None = None,
-                    agent_id: str | None = None, parent_id: str | None = None) -> Iterator[str]:
+                    agent_id: str | None = None, parent_id: str | None = None,
+                    identity: str | None = None) -> Iterator[str]:
         """Explicit agent boundary. ``parent_id`` overrides the inherited lineage
-        (pass :data:`UNKNOWN` when you *know* it was lost)."""
+        (pass :data:`UNKNOWN` when you *know* it was lost). ``identity`` overrides
+        the stable identity used for reputation (default: role|model|config hash)."""
         aid = agent_id or new_id("ag_")
         c = ctx.current()
         parent = parent_id if parent_id is not None else (c.agent_id or c.parent_agent_id)
         gid = group or c.group_id
         run_id = c.run_id or self._run_id()
+        chash = config_hash(config) if config else None
+        ident = identity or agent_identity(role, name, model, chash)
+        self.reputation.known_identities.add(ident)
         self.emit(AgentStart(run_id=run_id, group_id=gid, agent_id=aid, parent_id=parent, role=role, model=model,
-                             config_hash=config_hash(config) if config else None, name=name))
+                             config_hash=chash, name=name, attrs={"identity": ident}))
         t0 = time.perf_counter()
         status, err = "ok", None
         # Direct RunContext construction + set/reset: cheaper than replace() inside a nested context manager.
-        token = ctx.set_context(ctx.RunContext(run_id, gid, aid, parent, c.causes, self._arm_for(aid, c), c.baggage))
+        token = ctx.set_context(ctx.RunContext(run_id, gid, aid, parent, c.causes, self._arm_for(aid, c), c.baggage,
+                                               c.path + (ident,), c.request_id))
         try:
             yield aid
         except BaseException as e:  # noqa: BLE001
@@ -229,21 +240,24 @@ class Swarmscope:
         return self.experiment.assign(agent_id) if self.experiment else None
 
     def agent(self, fn: F | None = None, *, role: str | None = None, group: str | None = None,
-              model: str | None = None, config: dict[str, Any] | None = None, name: str | None = None) -> Any:
+              model: str | None = None, config: dict[str, Any] | None = None, name: str | None = None,
+              identity: str | None = None) -> Any:
         """Decorator marking a function (sync or async) as an agent invocation."""
 
         def deco(f: F) -> F:
             nm = name or f.__name__
+            # Register the arm at decoration time so the router can explore it before it has ever run.
+            self.reputation.register_identity(identity or agent_identity(role, nm, model, config_hash(config) if config else None))
             if inspect.iscoroutinefunction(f):
                 @functools.wraps(f)
                 async def aw(*a, **kw):
-                    with self.agent_scope(role=role, group=group, model=model, config=config, name=nm):
+                    with self.agent_scope(role=role, group=group, model=model, config=config, name=nm, identity=identity):
                         return await f(*a, **kw)
                 return aw  # type: ignore[return-value]
 
             @functools.wraps(f)
             def w(*a, **kw):
-                with self.agent_scope(role=role, group=group, model=model, config=config, name=nm):
+                with self.agent_scope(role=role, group=group, model=model, config=config, name=nm, identity=identity):
                     return f(*a, **kw)
             return w  # type: ignore[return-value]
 
@@ -413,8 +427,13 @@ class Swarmscope:
         except Exception:
             raw = repr(content)
         ev = Artifact(**base, kind=kind, content_hash=hash_bytes(raw), content=content if keep else None,
-                      inputs=list(c.causes) + list(inputs or []), size_bytes=len(raw), attrs=attrs)
+                      inputs=list(c.causes) + list(inputs or []), size_bytes=len(raw), attrs=attrs,
+                      route=list(c.path), request_id=c.request_id)
         self.emit(ev)
+        if c.request_id and c.path:
+            if len(self._artifact_meta) > 50_000:
+                self._artifact_meta.clear()
+            self._artifact_meta[ev.artifact_id] = (c.path, c.request_id, base["run_id"])
         return ArtifactRef(ev.artifact_id, kind, ev.content_hash or "", base["agent_id"], base["run_id"])
 
     def verdict(self, artifact: ArtifactRef | str, *, status: str, source: str, confidence: float = 1.0,
@@ -433,7 +452,44 @@ class Swarmscope:
         ev = Verdict(**base, artifact_id=aid, status=status, source=source, confidence=float(confidence),
                      evidence=dict(evidence or {}), inferred=inferred, attrs=attrs)
         self.emit(ev)
+        meta = self._artifact_meta.get(aid) if status != "pending" else None
+        if meta is not None:
+            route, req_id, rid = meta
+            if req_id:
+                self.reputation.record_outcome(request_id=req_id, artifact_id=aid, run_id=rid, route=route,
+                                               accepted=(status == "accepted"), source=source,
+                                               confidence=float(confidence), ts=ev.ts)
         return ev
+
+    # ---------------------------------------------------------------- requests
+    def request(self, text: str, *, kind: str = "request", metadata: dict[str, Any] | None = None,
+                candidates: Sequence[str] | None = None, **attrs) -> RoutingAdvice:
+        """Ask the reputation router who should handle this work.
+
+        Returns :class:`RoutingAdvice` (advisory: routes ranked by a bandit
+        policy over past verdicts on similar requests). Use it as a context
+        manager so artifacts produced inside are tied to the request and their
+        verdicts update the routes' reputation::
+
+            with sdk.request("prove lemma 3", kind="proof") as adv:
+                agent = pick(adv.recommended_agent)   # your decision
+                ...
+        """
+        metadata = dict(metadata or {})
+        base = self._base(run_level=True)
+        req_id = new_id("rq_")
+        adv = self.reputation.advise(text, request_id=req_id, kind=kind, metadata=metadata, run_id=base["run_id"],
+                                     candidates=candidates)
+        self.emit(Request(**base, request_id=req_id, text=text, kind=kind, metadata=metadata,
+                          advice=adv.to_dict(), attrs=attrs))
+        self.reputation.index_request(base["run_id"], req_id, text, metadata, base["agent_id"], kind=kind)
+
+        def _enter(rid: str):
+            c = ctx.current()
+            return ctx.set_context(replace(c, request_id=rid))
+
+        adv._enter = _enter
+        return adv
 
     # ---------------------------------------------------------- consolidation
     def consolidator(self, fn: F | None = None, *, name: str | None = None,
@@ -493,6 +549,7 @@ class Swarmscope:
             "buffer": {"pending": self.buffer.pending, "written": self.buffer.written,
                        "dropped": self.buffer.dropped, "errors": self.buffer.errors},
             "claims": self.claims.judge_stats,
+            "reputation": self.reputation.stats,
             "unpriced_models": dict(self.pricing.unpriced),
         }
 

@@ -6,5 +6,6 @@
   - [OpenAI SDK and Agents SDK](integrations/openai.md)
   - [LangChain and LangGraph](integrations/langchain.md)
   - [CrewAI](integrations/crewai.md)
+- [Reputation and routing](reputation.md): bandit routing of similar requests to previously successful agents and sequences.
 - [Storage backends](storage.md): SQLite, DuckDB, Postgres/pgvector; sharing a store across processes.
 - [Validation protocol](validation.md) and [results](results.md): reference workloads and the value-vs-k curves.

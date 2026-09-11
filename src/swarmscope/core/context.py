@@ -29,6 +29,10 @@ class RunContext:
     arm: str | None = None
     #: Free-form baggage propagated with the context (e.g. workload class).
     baggage: dict[str, str] = field(default_factory=dict)
+    #: Stable agent identities from the root to the current agent (the route so far).
+    path: tuple[str, ...] = field(default_factory=tuple)
+    #: Active ``sdk.request`` this work answers, if any.
+    request_id: str | None = None
 
     @property
     def has_agent(self) -> bool:
@@ -42,6 +46,10 @@ class RunContext:
                 h[HEADER_PREFIX + k.replace("_", "-")] = v
         if self.causes:
             h[HEADER_PREFIX + "causes"] = ",".join(self.causes)
+        if self.path:
+            h[HEADER_PREFIX + "path"] = "\x1f".join(self.path)
+        if self.request_id:
+            h[HEADER_PREFIX + "request-id"] = self.request_id
         return h
 
     @classmethod
@@ -52,6 +60,7 @@ class RunContext:
             return lower.get(HEADER_PREFIX + name)
 
         causes = tuple(x for x in (g("causes") or "").split(",") if x)
+        path = tuple(x for x in (g("path") or "").split("\x1f") if x)
         return cls(
             run_id=g("run-id"),
             group_id=g("group-id"),
@@ -59,6 +68,8 @@ class RunContext:
             parent_agent_id=g("agent-id"),
             causes=causes,
             arm=g("arm"),
+            path=path,
+            request_id=g("request-id"),
         )
 
 

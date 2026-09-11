@@ -12,7 +12,7 @@ import time
 from typing import Any, Iterable, Sequence
 
 from ..core.events import Event
-from .base import RunInfo, VectorHit
+from .base import RouteOutcome, RouteStat, RunInfo, VectorHit
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (run_id VARCHAR PRIMARY KEY, name VARCHAR, started_at DOUBLE, ended_at DOUBLE, meta VARCHAR);
@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS claim_vectors (
 );
 CREATE TABLE IF NOT EXISTS judge_cache (key VARCHAR PRIMARY KEY, value VARCHAR, ts DOUBLE);
 CREATE TABLE IF NOT EXISTS calibrations (workload VARCHAR PRIMARY KEY, value VARCHAR, ts DOUBLE);
+CREATE TABLE IF NOT EXISTS route_outcomes (
+  request_id VARCHAR, artifact_id VARCHAR, run_id VARCHAR, route_key VARCHAR, route VARCHAR, accepted BOOLEAN,
+  weight DOUBLE, ts DOUBLE, source VARCHAR, PRIMARY KEY (request_id, artifact_id)
+);
+CREATE TABLE IF NOT EXISTS route_stats (route_key VARCHAR PRIMARY KEY, route VARCHAR, successes DOUBLE, failures DOUBLE, last_ts DOUBLE);
 """
 
 
@@ -132,6 +137,48 @@ class DuckDBStore:
 
     def calibration_put(self, workload, value):
         self._ex("INSERT OR REPLACE INTO calibrations VALUES (?,?,?)", (workload, json.dumps(value, default=repr), time.time()))
+
+    # reputation ---------------------------------------------------------------
+    def route_outcomes_put(self, rows):
+        with self._lock:
+            self._conn.executemany("INSERT OR REPLACE INTO route_outcomes VALUES (?,?,?,?,?,?,?,?,?)",
+                                   [(r.request_id, r.artifact_id, r.run_id, r.route_key, json.dumps(r.route),
+                                     bool(r.accepted), r.weight, r.ts, r.source) for r in rows])
+
+    def route_outcomes(self, request_ids=None, limit=None):
+        sql, params = "SELECT request_id, artifact_id, run_id, route_key, route, accepted, weight, ts, source FROM route_outcomes", []
+        if request_ids is not None:
+            ids = list(request_ids)
+            if not ids:
+                return []
+            sql += f" WHERE request_id IN ({','.join('?' * len(ids))})"
+            params += ids
+        sql += " ORDER BY ts DESC"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        return [RouteOutcome(r[0], r[1], r[2], r[3], json.loads(r[4]), bool(r[5]), r[6], r[7], r[8] or "")
+                for r in self._ex(sql, params).fetchall()]
+
+    def route_stats_add(self, route_key, route, success, failure, ts):
+        with self._lock:
+            row = self._conn.execute("SELECT successes, failures, last_ts FROM route_stats WHERE route_key=?", [route_key]).fetchone()
+            if row:
+                self._conn.execute("UPDATE route_stats SET successes=?, failures=?, last_ts=? WHERE route_key=?",
+                                   [row[0] + success, row[1] + failure, max(row[2], ts), route_key])
+            else:
+                self._conn.execute("INSERT INTO route_stats VALUES (?,?,?,?,?)",
+                                   [route_key, json.dumps(list(route)), success, failure, ts])
+
+    def route_stats(self, limit=None):
+        sql = ("SELECT route_key, route, successes, failures, last_ts FROM route_stats "
+               "ORDER BY successes / (successes + failures + 1e-9) DESC, successes + failures DESC")
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        return [RouteStat(r[0], json.loads(r[1]), r[2], r[3], r[4]) for r in self._ex(sql).fetchall()]
+
+    def route_stats_clear(self):
+        self._ex("DELETE FROM route_stats")
+        self._ex("DELETE FROM route_outcomes")
 
     def flush(self):
         pass

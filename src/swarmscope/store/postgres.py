@@ -19,7 +19,7 @@ import time
 from typing import Any, Iterable, Sequence
 
 from ..core.events import Event
-from .base import RunInfo, VectorHit, cosine
+from .base import RouteOutcome, RouteStat, RunInfo, VectorHit, cosine
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS swarmscope_runs (
@@ -33,6 +33,13 @@ CREATE INDEX IF NOT EXISTS ix_ss_events_run_type ON swarmscope_events(run_id, ty
 CREATE INDEX IF NOT EXISTS ix_ss_events_run_agent ON swarmscope_events(run_id, agent_id);
 CREATE TABLE IF NOT EXISTS swarmscope_judge_cache (key TEXT PRIMARY KEY, value JSONB, ts DOUBLE PRECISION);
 CREATE TABLE IF NOT EXISTS swarmscope_calibrations (workload TEXT PRIMARY KEY, value JSONB, ts DOUBLE PRECISION);
+CREATE TABLE IF NOT EXISTS swarmscope_route_outcomes (
+  request_id TEXT, artifact_id TEXT, run_id TEXT, route_key TEXT, route JSONB, accepted BOOLEAN,
+  weight DOUBLE PRECISION, ts DOUBLE PRECISION, source TEXT, PRIMARY KEY (request_id, artifact_id)
+);
+CREATE TABLE IF NOT EXISTS swarmscope_route_stats (
+  route_key TEXT PRIMARY KEY, route JSONB, successes DOUBLE PRECISION, failures DOUBLE PRECISION, last_ts DOUBLE PRECISION
+);
 """
 
 _VECTORS_PLAIN = """
@@ -198,6 +205,52 @@ class PostgresStore:
         self._ex("""INSERT INTO swarmscope_calibrations VALUES (%s,%s::jsonb,%s)
                     ON CONFLICT (workload) DO UPDATE SET value=EXCLUDED.value, ts=EXCLUDED.ts""",
                  (workload, json.dumps(value, default=repr), time.time()))
+
+    # reputation ---------------------------------------------------------------
+    def route_outcomes_put(self, rows):
+        if not rows:
+            return
+        with self._lock, self._conn.cursor() as cur:
+            cur.executemany("""INSERT INTO swarmscope_route_outcomes VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+                               ON CONFLICT (request_id, artifact_id) DO UPDATE SET accepted=EXCLUDED.accepted,
+                               weight=EXCLUDED.weight, ts=EXCLUDED.ts, source=EXCLUDED.source""",
+                            [(r.request_id, r.artifact_id, r.run_id, r.route_key, json.dumps(r.route), bool(r.accepted),
+                              r.weight, r.ts, r.source) for r in rows])
+
+    def route_outcomes(self, request_ids=None, limit=None):
+        sql, params = "SELECT request_id, artifact_id, run_id, route_key, route, accepted, weight, ts, source FROM swarmscope_route_outcomes", []
+        if request_ids is not None:
+            ids = list(request_ids)
+            if not ids:
+                return []
+            sql += " WHERE request_id = ANY(%s)"
+            params.append(ids)
+        sql += " ORDER BY ts DESC"
+        if limit:
+            sql += " LIMIT %s"
+            params.append(int(limit))
+        return [RouteOutcome(r[0], r[1], r[2], r[3], r[4], bool(r[5]), r[6], r[7], r[8] or "")
+                for r in self._ex(sql, params, fetch="all")]
+
+    def route_stats_add(self, route_key, route, success, failure, ts):
+        self._ex("""INSERT INTO swarmscope_route_stats VALUES (%s,%s::jsonb,%s,%s,%s)
+                    ON CONFLICT (route_key) DO UPDATE SET successes=swarmscope_route_stats.successes+EXCLUDED.successes,
+                    failures=swarmscope_route_stats.failures+EXCLUDED.failures,
+                    last_ts=GREATEST(swarmscope_route_stats.last_ts, EXCLUDED.last_ts)""",
+                 (route_key, json.dumps(list(route)), success, failure, ts))
+
+    def route_stats(self, limit=None):
+        sql = ("SELECT route_key, route, successes, failures, last_ts FROM swarmscope_route_stats "
+               "ORDER BY successes / (successes + failures + 1e-9) DESC, successes + failures DESC")
+        params: list[Any] = []
+        if limit:
+            sql += " LIMIT %s"
+            params.append(int(limit))
+        return [RouteStat(r[0], r[1], r[2], r[3], r[4]) for r in self._ex(sql, params, fetch="all")]
+
+    def route_stats_clear(self):
+        self._ex("DELETE FROM swarmscope_route_stats")
+        self._ex("DELETE FROM swarmscope_route_outcomes")
 
     def flush(self):
         pass

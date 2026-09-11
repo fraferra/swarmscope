@@ -26,6 +26,8 @@ def test_dashboard_endpoints(tmp_path):
             assert body is not None
         waste = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/run/{run.run_id}/waste").read())
         assert waste["defined"] and waste["waste_ratio"] == 0.0
+        rep = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/reputation?unit=agent").read())
+        assert rep["leaderboard"] == []
     finally:
         httpd.shutdown()
         httpd.server_close()
