@@ -133,6 +133,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--json", default=None, help="also write raw results here")
     ap.add_argument("--model", default=None, help="model for the openai solver (default gpt-4o-mini)")
+    ap.add_argument("--model-map", default=None,
+                    help="per-workload model override, e.g. objective=gpt-4o-mini,fuzzy=gpt-4.1-mini")
     ap.add_argument("--max-usd", type=float, default=5.0, help="abort before starting if the estimate exceeds this")
     ap.add_argument("--yes", action="store_true", help="skip the cost confirmation for the openai solver")
     ap.add_argument("--workers", type=int, default=None, help="concurrent agents per swarm (default 8 for openai, 1 otherwise)")
@@ -161,12 +163,17 @@ def main(argv=None) -> int:
     else:
         solver = SOLVERS[a.solver]()
     workers = a.workers if a.workers is not None else (8 if a.solver == "openai" else 1)
+    model_map = dict(kv.split("=", 1) for kv in a.model_map.split(",")) if a.model_map else {}
     results: dict[str, Any] = {"solver": a.solver, "model": getattr(solver, "model", None), "ks": ks, "reps": a.reps,
                                "workers": workers, "workloads": {}}
     t_all = time.time()
     done_calls = 0
     for name in names:
         wl = WORKLOADS[name]
+        if name in model_map and hasattr(solver, "model"):
+            solver.model = model_map[name]
+        wl_model = getattr(solver, "model", None)
+        tag = f"{a.solver}:{wl_model}" if wl_model else a.solver
         sdk = ss.Swarmscope(a.store, gate=ss.GatePolicy(threshold=0.85))
         prospective: dict[int, list[float]] = {}
         costs: dict[int, list[float]] = {}
@@ -175,7 +182,7 @@ def main(argv=None) -> int:
             for r in range(a.reps):
                 seed = a.seed * 1000 + k * 10 + r
                 t_run = time.time()
-                key = f"vrun:{a.solver}:{name}-k{k}-s{seed}"
+                key = f"vrun:{tag}:{name}-k{k}-s{seed}"
                 prior = sdk.store.calibration_get(key) if a.resume else None
                 if prior:
                     rid, score, cost, resumed = prior["run_id"], prior["score"], prior["cost"], True
@@ -203,7 +210,7 @@ def main(argv=None) -> int:
 
         # dedup experiment: gated vs ungated arms on the largest k
         exp_sdk = ss.Swarmscope(a.store, gate=ss.GatePolicy(threshold=0.85), experiment=ss.ExperimentConfig())
-        key = f"vrun:{a.solver}:{name}-experiment-k{max(ks)}"
+        key = f"vrun:{tag}:{name}-experiment-k{max(ks)}"
         prior = exp_sdk.store.calibration_get(key) if a.resume else None
         if prior:
             rid_exp = prior["run_id"]
@@ -221,7 +228,7 @@ def main(argv=None) -> int:
             points.append({"k": k, "p_success": succ / len(xs), "ci": [lo, hi], "n": len(xs),
                            "score_mean": statistics.fmean(xs), "cost_usd_mean": statistics.fmean(costs[k])})
         results["workloads"][name] = {
-            "verdict_source": wl.verdict_source, "prospective": points, "ablation": curve.to_dict(),
+            "verdict_source": wl.verdict_source, "model": wl_model, "prospective": points, "ablation": curve.to_dict(),
             "shapley": shap.to_dict(), "waste": waste.to_dict(), "proxies": prox.to_dict(), "dedup_arms": arms,
             "largest_run": last_run,
         }
@@ -251,7 +258,8 @@ def write_report(res: dict[str, Any], path: str) -> None:
                  "ablation curves recover the prospective dose-response? are the CIs calibrated?), not any real "
                  "model. Re-run with `--solver openai` to produce real-model curves for your workload.\n")
     for name, w in res["workloads"].items():
-        L.append(f"\n## Workload: {name}  (verdict source: `{w['verdict_source']}`)\n")
+        L.append(f"\n## Workload: {name}  (verdict source: `{w['verdict_source']}`"
+                 f"{(', model: `' + w['model'] + '`') if w.get('model') else ''})\n")
         L.append("### P(success) vs k — prospective (independent runs) vs retrospective (replay ablation)\n")
         L.append("| k | prospective P(success) | 95% CI | retrospective P(success) | 95% CI | mean cost USD |")
         L.append("|---|---|---|---|---|---|")
