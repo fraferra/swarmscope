@@ -278,8 +278,10 @@ class OpenAISolver:
 
         from openai import APIStatusError, RateLimitError
 
+        import re as _re
+
         delay = 1.0
-        for attempt in range(8):
+        for attempt in range(20):
             self.limiter.acquire()
             try:
                 return self._client.chat.completions.create(**kw)
@@ -287,18 +289,22 @@ class OpenAISolver:
                 if "insufficient_quota" in str(exc):
                     raise
                 self.retries += 1
+                # honour the server's hint ("Please try again in 1.2s" / "in 120ms") when present
+                m = _re.search(r"try again in ([0-9.]+)(ms|s)", str(exc))
+                hint = (float(m.group(1)) / (1000.0 if m.group(2) == "ms" else 1.0)) if m else 0.0
+                delay = max(delay, hint)
             except APIStatusError as exc:
                 if exc.status_code < 500:
                     raise
                 self.retries += 1
             _t.sleep(delay + random.random() * 0.5)
-            delay = min(30.0, delay * 2)
-        raise RuntimeError("openai: gave up after 8 retries (rate limit / server errors)")
+            delay = min(60.0, delay * 2)
+        raise RuntimeError("openai: gave up after 20 retries (rate limit / server errors)")
 
     def solve(self, workload, task, rng, sdk):
-        if not self._instrumented:
+        if self._instrumented is not sdk:  # re-target the transport wrapper to the SDK of this run
             self._instrument(sdk, self._client)
-            self._instrumented = True
+            self._instrumented = sdk
         sdk.claim(f"{task.task_id}: attempt", kind="approach")
         sys_prompt = {
             "objective": "Reply with only Python code defining f. No imports, no prose.",

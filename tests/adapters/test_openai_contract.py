@@ -138,3 +138,23 @@ async def test_async_client(sdk):
             await aclient.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}])
     g = sdk.store.events(run.run_id, types=["generation"])[0]
     assert g.agent_id == a and g.input_tokens == 12
+
+
+def test_wrap_client_retargets_to_new_sdk():
+    """One client shared across SDK instances: generations go to the SDK that wrapped it last."""
+    client = _client()
+    a = ss.Swarmscope("memory://", flush_interval=0.01)
+    b = ss.Swarmscope("memory://", flush_interval=0.01)
+    try:
+        wrap_client(a, client)
+        with a.run("a") as ra:
+            client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}])
+        wrap_client(b, client)  # idempotent wrap, but re-targeted
+        with b.run("b") as rb:
+            client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}])
+        assert len(a.store.events(ra.run_id, types=["generation"])) == 1
+        assert len(b.store.events(rb.run_id, types=["generation"])) == 1
+        assert not a.store.events(rb.run_id, types=["generation"])
+    finally:
+        a.close()
+        b.close()

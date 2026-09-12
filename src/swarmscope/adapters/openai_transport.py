@@ -236,6 +236,9 @@ def wrap_client(sdk: Swarmscope, client, system: str = "openai"):
     if transport is None:
         raise TypeError("client has no httpx transport to wrap")
     if isinstance(transport, (_TransportWrapper, _AsyncTransportWrapper)):
+        # Already wrapped: re-target to this SDK instance (a client may outlive the SDK it was first
+        # wrapped with, e.g. one client shared across several runs/instances).
+        transport._sdk = sdk
         return client
     import httpx
 
