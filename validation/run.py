@@ -135,7 +135,8 @@ def main(argv=None) -> int:
     ap.add_argument("--model", default=None, help="model for the openai solver (default gpt-4o-mini)")
     ap.add_argument("--max-usd", type=float, default=5.0, help="abort before starting if the estimate exceeds this")
     ap.add_argument("--yes", action="store_true", help="skip the cost confirmation for the openai solver")
-    ap.add_argument("--workers", type=int, default=None, help="concurrent agents per swarm (default 16 for openai, 1 otherwise)")
+    ap.add_argument("--workers", type=int, default=None, help="concurrent agents per swarm (default 8 for openai, 1 otherwise)")
+    ap.add_argument("--resume", action="store_true", help="reuse swarms already completed in --store (same solver/seed)")
     a = ap.parse_args(argv)
 
     ks = [int(x) for x in a.ks.split(",")]
@@ -159,7 +160,7 @@ def main(argv=None) -> int:
             raise SystemExit(f"openai preflight failed ({type(exc).__name__}): {str(exc)[:300]}") from exc
     else:
         solver = SOLVERS[a.solver]()
-    workers = a.workers if a.workers is not None else (16 if a.solver == "openai" else 1)
+    workers = a.workers if a.workers is not None else (8 if a.solver == "openai" else 1)
     results: dict[str, Any] = {"solver": a.solver, "model": getattr(solver, "model", None), "ks": ks, "reps": a.reps,
                                "workers": workers, "workloads": {}}
     t_all = time.time()
@@ -174,14 +175,22 @@ def main(argv=None) -> int:
             for r in range(a.reps):
                 seed = a.seed * 1000 + k * 10 + r
                 t_run = time.time()
-                rid, score, _ = run_swarm(sdk, wl, solver, k, seed, task_idx=r, workers=workers)
-                cost = ss.cost_rollup(sdk.store, rid).totals["cost_usd"]
+                key = f"vrun:{a.solver}:{name}-k{k}-s{seed}"
+                prior = sdk.store.calibration_get(key) if a.resume else None
+                if prior:
+                    rid, score, cost, resumed = prior["run_id"], prior["score"], prior["cost"], True
+                else:
+                    rid, score, _ = run_swarm(sdk, wl, solver, k, seed, task_idx=r, workers=workers)
+                    cost = ss.cost_rollup(sdk.store, rid).totals["cost_usd"]
+                    sdk.store.calibration_put(key, {"run_id": rid, "score": float(score), "cost": cost})
+                    resumed = False
                 prospective.setdefault(k, []).append(float(score))
                 costs.setdefault(k, []).append(cost)
                 last_run = rid
                 done_calls += k
                 print(f"[{name}] k={k:<4d} rep={r} score={float(score):.2f} cost=${cost:.4f} "
-                      f"{time.time() - t_run:.1f}s  ({done_calls}/{total_calls} calls)", file=sys.stderr, flush=True)
+                      f"{time.time() - t_run:.1f}s  ({done_calls}/{total_calls} calls){' [resumed]' if resumed else ''}",
+                      file=sys.stderr, flush=True)
         # retrospective ablation on the largest run
         harness = ReplayHarness(sdk.store, last_run, wl.consolidate, name=f"{wl.name}-consolidate")
         task = wl.tasks[(a.reps - 1) % len(wl.tasks)]
@@ -194,7 +203,13 @@ def main(argv=None) -> int:
 
         # dedup experiment: gated vs ungated arms on the largest k
         exp_sdk = ss.Swarmscope(a.store, gate=ss.GatePolicy(threshold=0.85), experiment=ss.ExperimentConfig())
-        rid_exp, _, _ = run_swarm(exp_sdk, wl, solver, max(ks), a.seed + 999, workers=workers)
+        key = f"vrun:{a.solver}:{name}-experiment-k{max(ks)}"
+        prior = exp_sdk.store.calibration_get(key) if a.resume else None
+        if prior:
+            rid_exp = prior["run_id"]
+        else:
+            rid_exp, _, _ = run_swarm(exp_sdk, wl, solver, max(ks), a.seed + 999, workers=workers)
+            exp_sdk.store.calibration_put(key, {"run_id": rid_exp, "score": None, "cost": None})
         arms = arm_report(exp_sdk.store, rid_exp, wl.verdict_source)
         exp_sdk.close()
 
@@ -212,6 +227,7 @@ def main(argv=None) -> int:
         }
         sdk.close()
     results["elapsed_s"] = time.time() - t_all
+    results["solver_retries"] = getattr(solver, "retries", 0)
     if a.json:
         with open(a.json, "w") as f:
             json.dump(results, f, indent=1, default=str)

@@ -222,8 +222,41 @@ class SimulatedSolver:
         return {"draft": f"[{approach}] draft", "rubric_hits": hits}
 
 
+class RateLimiter:
+    """Token bucket shared by all workers: at most ``rpm`` requests per minute."""
+
+    def __init__(self, rpm: float) -> None:
+        import threading
+        import time as _t
+
+        self.rate = rpm / 60.0
+        self.capacity = max(1.0, rpm / 10.0)
+        self.tokens = self.capacity
+        self.updated = _t.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        import time as _t
+
+        while True:
+            with self._lock:
+                now = _t.monotonic()
+                self.tokens = min(self.capacity, self.tokens + (now - self.updated) * self.rate)
+                self.updated = now
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                wait = (1.0 - self.tokens) / self.rate
+            _t.sleep(wait)
+
+
 class OpenAISolver:
-    """Real model. Needs OPENAI_API_KEY and the openai extra."""
+    """Real model. Needs OPENAI_API_KEY and the openai extra.
+
+    Rate-limit aware: a shared token bucket (``rpm``) plus exponential backoff
+    with jitter on 429/5xx, so a swarm of concurrent agents never dies on the
+    organisation's requests-per-minute cap.
+    """
 
     name = "openai"
 
@@ -234,9 +267,33 @@ class OpenAISolver:
         from swarmscope.adapters.openai_transport import instrument_openai
 
         self.model = model or os.environ.get("SWARMSCOPE_VALIDATION_MODEL", "gpt-4o-mini")
-        self._client = OpenAI()
+        self._client = OpenAI(max_retries=0)  # we do our own backoff, with the limiter
         self._instrumented = False
         self._instrument = instrument_openai
+        self.limiter = RateLimiter(float(os.environ.get("SWARMSCOPE_VALIDATION_RPM", "400")))
+        self.retries = 0
+
+    def _chat(self, **kw):
+        import time as _t
+
+        from openai import APIStatusError, RateLimitError
+
+        delay = 1.0
+        for attempt in range(8):
+            self.limiter.acquire()
+            try:
+                return self._client.chat.completions.create(**kw)
+            except RateLimitError as exc:
+                if "insufficient_quota" in str(exc):
+                    raise
+                self.retries += 1
+            except APIStatusError as exc:
+                if exc.status_code < 500:
+                    raise
+                self.retries += 1
+            _t.sleep(delay + random.random() * 0.5)
+            delay = min(30.0, delay * 2)
+        raise RuntimeError("openai: gave up after 8 retries (rate limit / server errors)")
 
     def solve(self, workload, task, rng, sdk):
         if not self._instrumented:
@@ -248,9 +305,9 @@ class OpenAISolver:
             "semi-objective": "Answer with the shortest possible phrase.",
             "fuzzy": "Write the brief. Plain prose.",
         }[workload.name]
-        r = self._client.chat.completions.create(model=self.model, temperature=1.0, seed=rng.randint(0, 2**31),
-                                                 messages=[{"role": "system", "content": sys_prompt},
-                                                           {"role": "user", "content": task.prompt}])
+        r = self._chat(model=self.model, temperature=1.0, seed=rng.randint(0, 2**31),
+                       messages=[{"role": "system", "content": sys_prompt},
+                                 {"role": "user", "content": task.prompt}])
         text = (r.choices[0].message.content or "").strip()
         if workload.name == "objective":
             code = text.strip("`").removeprefix("python").strip()
