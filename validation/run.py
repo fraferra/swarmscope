@@ -260,7 +260,7 @@ def write_report(res: dict[str, Any], path: str) -> None:
             r = retro.get(p["k"])
             rp = f"{r['p_success']:.2f}" if r else "—"
             rci = f"[{r['ci_low']:.2f}, {r['ci_high']:.2f}]" if r else "—"
-            L.append(f"| {p['k']} | {p['p_success']:.2f} | [{p['ci'][0]:.2f}, {p['ci'][1]:.2f}] | {rp} | {rci} | {p['cost_usd_mean']:.3f} |")
+            L.append(f"| {p['k']} | {p['p_success']:.2f} | [{p['ci'][0]:.2f}, {p['ci'][1]:.2f}] | {rp} | {rci} | {p['cost_usd_mean']:.3g} |")
         ab = w["ablation"]
         fit = ab.get("fit") or {}
         L.append(f"\nEmpirical knee (first k whose CI reaches 95% of max): **{ab.get('knee_k')}**; "
@@ -275,8 +275,8 @@ def write_report(res: dict[str, Any], path: str) -> None:
         if ws["defined"]:
             d = ws["cost_per_accepted_dist"]
             L.append(f"Waste ratio {ws['waste_ratio']:.1%} (tokens); {ws['accepted_artifacts']} accepted of "
-                     f"{ws['total_agents']} agents; cost per accepted artifact p50={d.get('p50', 0):.4f} "
-                     f"p90={d.get('p90', 0):.4f} max={d.get('p100', 0):.4f} USD.")
+                     f"{ws['total_agents']} agents; cost per accepted artifact p50={d.get('p50', 0):.3g} "
+                     f"p90={d.get('p90', 0):.3g} max={d.get('p100', 0):.3g} USD.")
         else:
             L.append(f"Waste ratio undefined: {ws['reason']}")
         L.append("\n### Group Shapley (largest run, 60 permutations)\n")
@@ -288,7 +288,7 @@ def write_report(res: dict[str, Any], path: str) -> None:
         L.append("|---|---|---|---|---|---|---|---|")
         for arm, d in w["dedup_arms"].items():
             rate = d["hits"] / d["claims"] if d.get("claims") else 0
-            cpa = "—" if d.get("cost_per_accepted") is None else f"{d['cost_per_accepted']:.4f}"
+            cpa = "—" if d.get("cost_per_accepted") is None else f"{d['cost_per_accepted']:.3g}"
             L.append(f"| `{arm}` | {int(d.get('agents', 0))} | {int(d.get('claims', 0))} | {rate:.0%} | "
                      f"{int(d.get('suppressions', 0))} | {int(d.get('tokens', 0))} | {int(d.get('accepted', 0))} | {cpa} |")
         L.append("\nThe gate is advisory: gated-arm agents skipped ~70% of duplicate approaches. Compare accepted "
@@ -309,5 +309,14 @@ def write_report(res: dict[str, Any], path: str) -> None:
         f.write("\n".join(L) + "\n")
 
 
+def regenerate(json_path: str, out: str) -> None:
+    """Rewrite the markdown report from a saved results JSON (no model calls)."""
+    with open(json_path) as f:
+        write_report(json.load(f), out)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--regenerate":
+        regenerate(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "docs/results.md")
+        sys.exit(0)
     sys.exit(main())
