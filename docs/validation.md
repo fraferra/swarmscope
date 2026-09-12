@@ -3,9 +3,23 @@
 The published value-vs-k curves are the project's credibility artifact. This
 document fixes the protocol so the numbers are comparable across workloads and
 over time. The harness is `validation/` (`python -m validation.run`); the
-latest output is [results.md](results.md). With the default `simulated` solver
-the whole protocol runs in ~10 s and validates the *methodology*; the
-`openai` solver runs the same protocol against a real model.
+published real-model output is [results.md](results.md). With the default
+`simulated` solver the whole protocol runs in ~10 s and validates the
+*methodology*; the `openai` solver runs the same protocol against a real model.
+
+Practicalities for real-model runs:
+
+- ~11,000 calls for the full protocol. OpenAI tier-1 organisations have a
+  10,000 requests/day cap *per model*; use `--model-map` to spread workloads
+  across models (each workload stays single-model and the report says which),
+  or `--resume` across days. The runner rate-limits itself (400 rpm), backs
+  off on 429s, and reuses completed swarms.
+- Analysis is separable from data collection: `python -m validation.run
+  --reanalyze <store> docs/results.json docs/results.md` recomputes ablation
+  (pooled over all largest-k runs so it averages the same tasks as the
+  prospective points), per-task breakdowns, waste and proxies from the store
+  with no model calls.
+- Put a `.env` with `OPENAI_API_KEY=...` in the project root; it is gitignored.
 
 ## Three workloads, spanning the acceptance-signal spectrum
 

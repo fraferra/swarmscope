@@ -152,7 +152,9 @@ Budget: < 3 % wall-clock and < 5 MB RSS per 1k agents for the in-process buffer.
 
 ## Validation
 
-`python -m validation.run` runs the three reference workloads (objective verifier, semi-objective judge, fuzzy human) at k ∈ {1, 5, 25, 100, 500}, five independent runs per k, and compares the prospective dose-response with the retrospective replay-ablation curve, reports group Shapley with CIs, waste, and a gated-vs-ungated dedup experiment. Results for the simulated solver are in [docs/results.md](docs/results.md); `--solver openai` runs the same protocol against a real model. The protocol is in [docs/validation.md](docs/validation.md).
+`python -m validation.run` runs the three reference workloads (objective verifier, semi-objective judge, fuzzy human) at k ∈ {1, 5, 25, 100, 500}, five independent runs per k, and compares the prospective dose-response with the retrospective replay-ablation curve, reports group Shapley with CIs, waste, and a gated-vs-ungated dedup experiment.
+
+**Real-model results** (`--solver openai`, ~9,500 calls, $1.28) are in [docs/results.md](docs/results.md). Headlines: replay ablation reproduces the prospective curve on all three workloads; the objective tasks saturate at k=1 for a current small model; on the multi-hop QA workload P(success) is flat at 0.40 from k=25 to k=500 because plurality consolidation loses whenever the confident majority is wrong, so the consolidator, not the agent count, is the bottleneck; cost scales linearly with k while value does not. The protocol is in [docs/validation.md](docs/validation.md).
 
 ## Status
 

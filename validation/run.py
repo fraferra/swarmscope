@@ -252,6 +252,13 @@ def write_report(res: dict[str, Any], path: str) -> None:
         L.append("> **Real-model curves.** Each agent is one `gpt-4o-mini`-class call at temperature 1.0 with a distinct "
                  "seed; verdicts come from the workload's verifier/judge; the fuzzy workload's verdicts are a keyword "
                  "rubric proxy (`source=judge`, confidence 0.5) until a human reviews them.\n")
+    if res.get("findings"):
+        L.append("## Findings\n")
+        for item in res["findings"]:
+            L.append(f"- {item}")
+        L.append("")
+    if res.get("spend_note"):
+        L.append(f"_{res['spend_note']}_\n")
     if res["solver"] == "simulated":
         L.append("> **These curves come from the simulated solver**: a deterministic stand-in whose per-agent "
                  "success probability is fixed per approach. They validate the *methodology* (do retrospective "
@@ -269,8 +276,20 @@ def write_report(res: dict[str, Any], path: str) -> None:
             rp = f"{r['p_success']:.2f}" if r else "—"
             rci = f"[{r['ci_low']:.2f}, {r['ci_high']:.2f}]" if r else "—"
             L.append(f"| {p['k']} | {p['p_success']:.2f} | [{p['ci'][0]:.2f}, {p['ci'][1]:.2f}] | {rp} | {rci} | {p['cost_usd_mean']:.3g} |")
+        if w.get("per_task"):
+            L.append("\n### Per task at the largest k (agent accuracy vs consolidated outcome)\n")
+            L.append("| task | agents correct | P(agent correct) | consolidated correct? |\n|---|---|---|---|")
+            for t in w["per_task"]:
+                if t.get("accepted") is None:
+                    L.append(f"| {t['task']} | not measured | — | {'yes (proxy)' if t['score'] >= 0.99 else 'no (proxy)'} |")
+                else:
+                    L.append(f"| {t['task']} | {t['accepted']}/{t['agents']} | {t['agent_rate']:.2f} | "
+                             f"{'yes' if t['score'] >= 0.99 else 'no'} |")
         ab = w["ablation"]
         fit = ab.get("fit") or {}
+        if w.get("retro_pooled_runs"):
+            L.append(f"\nRetrospective column: replay ablation pooled over the {w['retro_pooled_runs']} runs at the largest k "
+                     f"(one per task/rep), so both columns average over the same tasks.")
         L.append(f"\nEmpirical knee (first k whose CI reaches 95% of max): **{ab.get('knee_k')}**; "
                  f"independent-lottery fit q={fit.get('q', 0):.3f} → knee≈{fit.get('knee_k')}. "
                  f"Replay fidelity: identical={ab['fidelity']['identical'] if ab.get('fidelity') else None}.")
@@ -299,8 +318,14 @@ def write_report(res: dict[str, Any], path: str) -> None:
             cpa = "—" if d.get("cost_per_accepted") is None else f"{d['cost_per_accepted']:.3g}"
             L.append(f"| `{arm}` | {int(d.get('agents', 0))} | {int(d.get('claims', 0))} | {rate:.0%} | "
                      f"{int(d.get('suppressions', 0))} | {int(d.get('tokens', 0))} | {int(d.get('accepted', 0))} | {cpa} |")
-        L.append("\nThe gate is advisory: gated-arm agents skipped ~70% of duplicate approaches. Compare accepted "
-                 "artifacts and cost per accepted between arms; a gate that lowers the first is net-harmful on this workload.")
+        if res["solver"] == "simulated":
+            L.append("\nThe gate is advisory: simulated gated-arm agents skip ~70% of duplicate approaches. Compare accepted "
+                     "artifacts and cost per accepted between arms; a gate that lowers the first is net-harmful on this workload.")
+        else:
+            L.append("\n**Uninformative with this solver.** The real-model solver registers one identical claim per agent "
+                     "(it does not express its approach), so every claim after the first is a duplicate and no agent acts on "
+                     "the advice (0 suppressions). The arms differ only by random assignment. A dedup experiment on real "
+                     "models needs agents that emit distinct approach claims and honour `suggest_skip`.")
         px = w["proxies"]
         hit_rate = "—" if px["dedup_hit_rate"] is None else f"{px['dedup_hit_rate']:.0%}"
         entropy = "—" if px["coverage_entropy"] is None else f"{px['coverage_entropy']:.2f}"
@@ -317,6 +342,80 @@ def write_report(res: dict[str, Any], path: str) -> None:
         f.write("\n".join(L) + "\n")
 
 
+def reanalyze(store_url: str, json_path: str, out: str) -> None:
+    """Recompute every analysis section from the store (no model calls) and rewrite the report.
+
+    Uses the per-swarm completion records to find run ids. The retrospective
+    curve is pooled over all runs at the largest k so it averages the same
+    tasks as the prospective points.
+    """
+    from swarmscope.attribution.graph import LineageGraph
+    from swarmscope.evaluation.ablation import fit_saturation, quantiles, wilson
+    from swarmscope.store.base import open_store
+
+    with open(json_path) as f:
+        res = json.load(f)
+    store = open_store(store_url)
+    ks = res["ks"]
+    for name, w in res["workloads"].items():
+        wl = WORKLOADS[name]
+        tag = f"{res['solver']}:{w['model']}" if w.get("model") else res["solver"]
+        runs: dict[tuple[int, int], dict[str, Any]] = {}
+        for r in range(res["reps"]):
+            for k in ks:
+                seed = k * 10 + r  # a.seed == 0 for the published runs
+                rec = store.calibration_get(f"vrun:{tag}:{name}-k{k}-s{seed}")
+                if rec:
+                    runs[(k, r)] = rec
+        # pooled retrospective over the max-k runs
+        kmax = max(ks)
+        pooled: dict[int, list[float]] = {k: [] for k in ks}
+        pooled_cost: dict[int, list[float]] = {k: [] for k in ks}
+        fidelity_ok = True
+        per_task = []
+        for r in range(res["reps"]):
+            rec = runs.get((kmax, r))
+            if not rec:
+                continue
+            task = wl.tasks[r % len(wl.tasks)]
+            h = ReplayHarness(store, rec["run_id"], wl.consolidate, name=f"{wl.name}-consolidate")
+            curve = ablate(h, lambda out, t=task: wl.score(t, out), ks=ks, samples=40, seed=r, success_threshold=0.99)
+            fidelity_ok = fidelity_ok and bool(curve.fidelity and curve.fidelity.identical)
+            for pt in curve.points:
+                pooled[pt.k] += [1.0] * pt.successes + [0.0] * (pt.n_samples - pt.successes)
+                pooled_cost[pt.k].append(pt.cost_usd_mean or 0.0)
+            g = LineageGraph(store.events(rec["run_id"]))
+            if wl.check is None:  # no per-agent verdicts on this workload (human-reviewed): not measured
+                per_task.append({"task": task.task_id, "agents": len(h.agent_ids), "accepted": None,
+                                 "agent_rate": None, "score": float(rec["score"])})
+            else:
+                acc = g.accepted_artifacts([wl.verdict_source], include_inferred=True)
+                per_task.append({"task": task.task_id, "agents": len(h.agent_ids), "accepted": len(acc),
+                                 "agent_rate": len(acc) / max(1, len(h.agent_ids)), "score": float(rec["score"])})
+        points = []
+        for k in ks:
+            xs = pooled[k]
+            if not xs:
+                continue
+            succ = int(sum(xs))
+            lo, hi = wilson(succ, len(xs))
+            points.append({"k": k, "n_samples": len(xs), "successes": succ, "p_success": succ / len(xs),
+                           "ci_low": lo, "ci_high": hi, "score_mean": succ / len(xs), "score_quantiles": quantiles(xs),
+                           "cost_usd_mean": sum(pooled_cost[k]) / max(1, len(pooled_cost[k]))})
+        fit = fit_saturation([p["k"] for p in points], [p["successes"] for p in points], [p["n_samples"] for p in points])
+        pmax = max((p["p_success"] for p in points), default=0.0)
+        knee = next((p["k"] for p in points if p["ci_high"] >= 0.95 * pmax and p["p_success"] >= 0.95 * pmax), None)
+        w["ablation"] = {"points": points, "knee_k": knee, "notes": [], "replayable": True,
+                         "fidelity": {"identical": fidelity_ok, "gap": 0.0 if fidelity_ok else None},
+                         "fit": {"q": fit.q, "knee_k": fit.knee_k, "log_likelihood": fit.log_likelihood}}
+        w["per_task"] = per_task
+        w["retro_pooled_runs"] = len(per_task)
+    with open(json_path, "w") as f:
+        json.dump(res, f, indent=1, default=str)
+    write_report(res, out)
+    store.close()
+
+
 def regenerate(json_path: str, out: str) -> None:
     """Rewrite the markdown report from a saved results JSON (no model calls)."""
     with open(json_path) as f:
@@ -326,5 +425,8 @@ def regenerate(json_path: str, out: str) -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--regenerate":
         regenerate(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "docs/results.md")
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--reanalyze":
+        reanalyze(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "docs/results.md")
         sys.exit(0)
     sys.exit(main())
