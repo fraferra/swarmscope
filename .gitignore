@@ -11,3 +11,5 @@ build/
 .pytest_cache/
 bench.json
 .DS_Store
+.env
+.env.*

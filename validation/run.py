@@ -106,7 +106,23 @@ def arm_report(store, run_id: str, source: str) -> dict[str, dict[str, float]]:
     return arms
 
 
+def _load_dotenv(path: str = ".env") -> None:
+    """Minimal .env loader (KEY=value lines; no dependency). Existing env wins."""
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k, v = k.strip().removeprefix("export ").strip(), v.strip().strip("'\"")
+                os.environ.setdefault(k, v)
+    except FileNotFoundError:
+        pass
+
+
 def main(argv=None) -> int:
+    _load_dotenv()
     ap = argparse.ArgumentParser()
     ap.add_argument("--solver", choices=list(SOLVERS), default="simulated")
     ap.add_argument("--workload", choices=list(WORKLOADS) + ["all"], default="all")
@@ -135,6 +151,12 @@ def main(argv=None) -> int:
             if input("proceed? [y/N] ").strip().lower() != "y":
                 raise SystemExit("aborted")
         solver = SOLVERS["openai"](a.model)
+        # Preflight one tiny call so quota/auth problems abort here, not after thousands of failed generations.
+        try:
+            solver._client.chat.completions.create(model=solver.model, max_tokens=1,
+                                                   messages=[{"role": "user", "content": "ok"}])
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"openai preflight failed ({type(exc).__name__}): {str(exc)[:300]}") from exc
     else:
         solver = SOLVERS[a.solver]()
     workers = a.workers if a.workers is not None else (16 if a.solver == "openai" else 1)
